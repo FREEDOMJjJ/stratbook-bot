@@ -131,7 +131,8 @@ async def check_calendar_loop():
 
                 state = processed_events[event_id]
                 time_until = event_time - now
-                local_time = event_time.astimezone()
+                moscow_tz = timezone(timedelta(hours=3))
+                local_time = event_time.astimezone(moscow_tz)
                 date_str = local_time.strftime("%d.%m.%Y")
                 time_str = local_time.strftime("%H:%M")
 
@@ -139,7 +140,8 @@ async def check_calendar_loop():
                 if not state["notified_new"]:
                     await bot.send_message(
                         GROUP_ID,
-                        f"🎮 <b>НОВЫЙ ПРАК ИЗ КАЛЕНДАРЯ!</b>\n\n"
+                        f"🎮 <b>НОВЫЙ ПРАК ИЗ КАЛЕНДАРЯ!</b>
+📅 <i>(синхронизируется с Google Calendar и Pracc.com)</i>\n\n"
                         f"🗺 {summary}\n"
                         f"📅 {date_str} в {time_str}\n\n"
                         f"{PLAYERS}",
@@ -153,7 +155,8 @@ async def check_calendar_loop():
                 if not state["notified_day"] and timedelta(hours=23, minutes=50) < time_until <= timedelta(hours=24, minutes=10):
                     sent = await bot.send_message(
                         GROUP_ID,
-                        f"🔔 <b>Напоминание! Прак завтра!</b>\n\n"
+                        f"🔔 <b>Напоминание! Прак завтра!</b>
+📅 <i>(из Google Calendar и Pracc.com)</i>\n\n"
                         f"🗺 {summary}\n"
                         f"📅 {date_str} в {time_str}\n\n"
                         f"{PLAYERS}",
@@ -168,7 +171,8 @@ async def check_calendar_loop():
                 if not state["notified_hour"] and timedelta(minutes=50) < time_until <= timedelta(hours=1, minutes=10):
                     sent = await bot.send_message(
                         GROUP_ID,
-                        f"⏰ <b>Через час прак!</b>\n\n"
+                        f"⏰ <b>Через час прак!</b>
+📅 <i>(из Google Calendar и Pracc.com)</i>\n\n"
                         f"🗺 {summary}\n"
                         f"🕐 {time_str}\n\n"
                         f"{PLAYERS}",
@@ -261,7 +265,8 @@ async def cmd_upcoming(message: types.Message):
         start = event['start'].get('dateTime', event['start'].get('date'))
         if 'T' in start:
             event_time = datetime.fromisoformat(start.replace('Z', '+00:00'))
-            local_time = event_time.astimezone()
+            moscow_tz = timezone(timedelta(hours=3))
+                local_time = event_time.astimezone(moscow_tz)
             date_str = local_time.strftime("%d.%m.%Y %H:%M")
             text += f"🗺 {summary} — {date_str}\n"
 
