@@ -9,6 +9,9 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 # ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
+GROUP_ID = -1003680698112  # ID группы команды
+ADMIN_ID = None  # Твой Telegram ID — заполним после
+
 STRAT_BOOKS = {
     "mirage": "https://docs.google.com/document/d/1KfaADUAV4jy2QqHyjUlAJ5rBd9SQuFokAmQN86DDHEE/edit?tab=t.5w09v52hr780",
     "dust2":  "https://docs.google.com/document/d/1o_B5xguuRmTO1lw2b9NB7sphzWZFvlEiQaU2VKlbzDU/edit?tab=t.5w09v52hr780",
@@ -65,6 +68,25 @@ def map_menu(section: str):
     )
     kb.add(InlineKeyboardButton("⬅️ Назад", callback_data="back:main"))
     return kb
+
+
+@dp.message_handler(commands=["notify"])
+async def cmd_notify(message: types.Message):
+    if message.chat.type != "private":
+        await message.delete()
+        return
+
+    text = message.text.replace("/notify", "").strip()
+    if not text:
+        await message.reply("✏️ Укажи текст: /notify Добавлен stratbook на Ancient")
+        return
+
+    await bot.send_message(
+        GROUP_ID,
+        f"🔔 <b>Обновление от тренера!</b>\n\n{text}",
+        parse_mode="HTML"
+    )
+    await message.reply("✅ Уведомление отправлено в группу!")
 
 
 @dp.message_handler(commands=["id"])
