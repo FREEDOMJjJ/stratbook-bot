@@ -67,6 +67,15 @@ def map_menu(section: str):
     return kb
 
 
+@dp.message_handler(commands=["id"])
+async def cmd_id(message: types.Message):
+    sent = await message.reply(
+        f"🆔 <b>ID этого чата:</b> <code>{message.chat.id}</code>",
+        parse_mode="HTML"
+    )
+    asyncio.create_task(auto_delete(sent))
+
+
 @dp.message_handler(commands=["maps"])
 async def cmd_maps(message: types.Message):
     sent = await message.reply(
