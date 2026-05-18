@@ -212,7 +212,8 @@ async def map_chosen(call: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data == "back:main")
 async def back_to_main(call: types.CallbackQuery):
     await call.message.edit_text(
-        "🗺️ <b>Выбери раздел:</b>",
+        "📚 <b>EGOIST STRATBOOK</b>\n\n"
+        "Выбери раздел и получи нужную информацию:",
         parse_mode="HTML",
         reply_markup=main_menu()
     )
