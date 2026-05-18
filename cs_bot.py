@@ -18,6 +18,7 @@ CALENDAR_ID = "85f813a348453bc70b98c82024ac2d7db492896a82798537ce2a4e7175a0feb3@
 GROUP_ID = -1003680698112
 STRATBOOK_TOPIC_ID = 1542
 SCRIMS_TOPIC_ID = 15
+CHAT_TOPIC_ID = 13  # Раздел ЧАТ для цитат дня
 ADMIN_ID = 557066322
 PINNED_MESSAGE_ID = 1707
 
@@ -44,7 +45,45 @@ MAP_KEYWORDS = {
 }
 
 PROCESSED_EVENTS_FILE = "/tmp/processed_events.json"
+LOGS_FILE = "/tmp/bot_logs.json"
+LAST_QUOTE_DATE_FILE = "/tmp/last_quote_date.txt"
+USED_QUOTES_FILE = "/tmp/used_quotes.json"
 processed_events = {}
+action_logs = []
+used_quotes = []  # Индексы использованных цитат
+
+QUOTES = [
+    ("Я не проиграю никогда. Я либо побеждаю, либо учусь.", "s1mple"),
+    ("Тренировка делает чемпиона.", "ZywOo"),
+    ("Лучше один правильный аим, чем сто промахов.", "NiKo"),
+    ("В CS нет случайностей, есть только подготовка.", "device"),
+    ("Командная игра больше индивидуальных скилов.", "GeT_RiGhT"),
+    ("Калм важнее реакции. Голова решает всё.", "olofmeister"),
+    ("Каждый матч — это возможность стать лучше.", "f0rest"),
+    ("Не бойся проигрывать — бойся не учиться.", "shox"),
+    ("Снайпер делает разницу между топ-1 и топ-10.", "kennyS"),
+    ("Скилл — это привычка, повторённая тысячу раз.", "coldzera"),
+    ("Дисциплина побеждает талант.", "FalleN"),
+    ("Лучший игрок — тот, кто помогает команде.", "Xyp9x"),
+    ("Уверенность приходит с подготовкой.", "dupreeh"),
+    ("Не играй ради статы — играй ради победы.", "karrigan"),
+    ("Слушай айгиэля и доверяй сокомандникам.", "gla1ve"),
+    ("Аим без головы — это просто клики.", "ScreaM"),
+    ("Каждая граната — это инвестиция в раунд.", "Magisk"),
+    ("Лучшая защита — это правильный setup.", "Snax"),
+    ("Не повторяй одни и те же ошибки. Учись быстро.", "pashaBiceps"),
+    ("Микро-движения решают перестрелки.", "GuardiaN"),
+    ("CS — это шахматы со стволами.", "TaZ"),
+    ("Тимплей важнее, чем индивидуальные действия.", "Snappi"),
+    ("Учись у поражений больше, чем у побед.", "Twistzz"),
+    ("Лучше тихо победить, чем громко проиграть.", "EliGE"),
+    ("Каждый раунд — это новая возможность.", "NAF"),
+    ("Стратегия без исполнения — это ничего.", "stanislaw"),
+    ("Терпение — главное оружие снайпера.", "JW"),
+    ("Не играй против врагов — играй против карты.", "Aleksib"),
+    ("Самое важное — это коммуникация в команде.", "allu"),
+    ("В сложной ситуации делай простое.", "blameF"),
+]
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
@@ -64,6 +103,65 @@ def load_processed():
 def save_processed():
     with open(PROCESSED_EVENTS_FILE, 'w') as f:
         json.dump(processed_events, f)
+
+
+def load_logs():
+    global action_logs
+    if os.path.exists(LOGS_FILE):
+        try:
+            with open(LOGS_FILE, 'r') as f:
+                action_logs = json.load(f)
+        except:
+            action_logs = []
+
+
+def save_logs():
+    with open(LOGS_FILE, 'w') as f:
+        json.dump(action_logs[-100:], f, ensure_ascii=False)
+
+
+def log_action(user, action: str):
+    moscow_tz = timezone(timedelta(hours=3))
+    timestamp = datetime.now(moscow_tz).strftime("%d.%m.%Y %H:%M")
+    username = user.username or user.full_name or str(user.id)
+    action_logs.append({
+        "time": timestamp,
+        "user": f"@{username}" if user.username else username,
+        "action": action
+    })
+    save_logs()
+
+
+def load_used_quotes():
+    global used_quotes
+    if os.path.exists(USED_QUOTES_FILE):
+        try:
+            with open(USED_QUOTES_FILE, 'r') as f:
+                used_quotes = json.load(f)
+        except:
+            used_quotes = []
+
+
+def save_used_quotes():
+    with open(USED_QUOTES_FILE, 'w') as f:
+        json.dump(used_quotes, f)
+
+
+def get_unused_quote():
+    """Возвращает (quote, author, index) из неиспользованных цитат"""
+    import random
+    available = [i for i in range(len(QUOTES)) if i not in used_quotes]
+    
+    # Если все цитаты использованы — сбрасываем список
+    if not available:
+        used_quotes.clear()
+        available = list(range(len(QUOTES)))
+    
+    idx = random.choice(available)
+    used_quotes.append(idx)
+    save_used_quotes()
+    quote, author = QUOTES[idx]
+    return quote, author
 
 
 def get_calendar_service():
@@ -101,7 +199,43 @@ async def fetch_calendar_events():
         return []
 
 
+async def daily_quote_loop():
+    """Отправляет цитату дня в 10:00 по МСК каждый день"""
+    import random
+    moscow_tz = timezone(timedelta(hours=3))
+    
+    while True:
+        try:
+            now = datetime.now(moscow_tz)
+            
+            # Проверяем была ли уже сегодня цитата
+            today_str = now.strftime("%Y-%m-%d")
+            last_date = ""
+            if os.path.exists(LAST_QUOTE_DATE_FILE):
+                with open(LAST_QUOTE_DATE_FILE, 'r') as f:
+                    last_date = f.read().strip()
+            
+            # Если уже 10:00 или позже и сегодня ещё не отправляли
+            if now.hour >= 10 and last_date != today_str:
+                quote, author = get_unused_quote()
+                await bot.send_message(
+                    GROUP_ID,
+                    f"☀️ <b>Доброе утро, ЭГОИСТЫ!</b>\n\n"
+                    f"💬 <i>«{quote}»</i>\n"
+                    f"— <b>{author}</b>",
+                    parse_mode="HTML",
+                    message_thread_id=CHAT_TOPIC_ID
+                )
+                with open(LAST_QUOTE_DATE_FILE, 'w') as f:
+                    f.write(today_str)
+        except Exception as e:
+            logging.error(f"Ошибка в daily_quote_loop: {e}")
+        
+        await asyncio.sleep(300)  # Проверяем каждые 5 минут
+
+
 async def check_calendar_loop():
+    is_first_run = True  # Флаг первого запуска после деплоя
     while True:
         try:
             events = await fetch_calendar_events()
@@ -120,18 +254,28 @@ async def check_calendar_loop():
                 local_time = event_time.astimezone(moscow_tz)
                 date_str = local_time.strftime("%d.%m.%Y")
                 time_str = local_time.strftime("%H:%M")
-
-                if event_id not in processed_events:
-                    processed_events[event_id] = {
-                        "notified_new": False,
-                        "notified_day": False,
-                        "notified_hour": False
-                    }
-
-                state = processed_events[event_id]
                 time_until = event_time - now
 
-                # Уведомление о новом праке
+                if event_id not in processed_events:
+                    # При первом запуске после деплоя считаем все существующие праки уже обработанными
+                    if is_first_run:
+                        processed_events[event_id] = {
+                            "notified_new": True,
+                            "notified_day": time_until < timedelta(hours=24),
+                            "notified_hour": time_until < timedelta(hours=1)
+                        }
+                        save_processed()
+                        continue
+                    else:
+                        processed_events[event_id] = {
+                            "notified_new": False,
+                            "notified_day": time_until < timedelta(hours=24),
+                            "notified_hour": time_until < timedelta(hours=1)
+                        }
+
+                state = processed_events[event_id]
+
+                # Уведомление о новом праке (всегда, даже если он скоро)
                 if not state["notified_new"]:
                     await bot.send_message(
                         GROUP_ID,
@@ -178,6 +322,8 @@ async def check_calendar_loop():
                     save_processed()
                     asyncio.create_task(auto_delete(sent, 3600))
 
+            is_first_run = False  # После первого прохода флаг снимается
+
         except Exception as e:
             logging.error(f"Ошибка в check_calendar_loop: {e}")
 
@@ -216,7 +362,10 @@ def map_menu(section: str):
 
 async def on_startup(dp):
     load_processed()
+    load_logs()
+    load_used_quotes()
     asyncio.create_task(check_calendar_loop())
+    asyncio.create_task(daily_quote_loop())
     try:
         await bot.edit_message_text(
             "📚 <b>EGOIST STRATBOOK</b>\n\nВыбери раздел и получи нужную информацию:",
@@ -236,12 +385,59 @@ async def cmd_help(message: types.Message):
     await message.reply(
         "📋 <b>Команды:</b>\n\n"
         "📅 /upcoming — ближайшие праки из календаря\n"
-        "🔔 /notify текст — отправить уведомление в STRATBOOK\n"
+        "💬 /quote — отправить случайную цитату в чат\n"
+        "📜 /logs — последние 20 действий в боте\n"
+        "🔔 /notify текст — уведомление в STRATBOOK\n"
         "📌 /post — обновить закреплённое сообщение\n"
+        "🔄 /restart — перезапустить бота\n"
         "🆔 /id — узнать ID чата\n"
         "📖 /maps — меню карт",
         parse_mode="HTML"
     )
+
+
+@dp.message_handler(commands=["restart"])
+async def cmd_restart(message: types.Message):
+    if message.chat.type != "private" or message.from_user.id != ADMIN_ID:
+        return
+    await message.reply("🔄 Перезапускаю бота... Через 5-10 секунд он будет онлайн.")
+    log_action(message.from_user, "Перезапустил бота")
+    await asyncio.sleep(1)
+    os._exit(0)  # Railway автоматически перезапустит
+
+
+@dp.message_handler(commands=["logs"])
+async def cmd_logs(message: types.Message):
+    if message.chat.type != "private" or message.from_user.id != ADMIN_ID:
+        return
+    
+    if not action_logs:
+        await message.reply("📭 Пока нет записанных действий.")
+        return
+    
+    last_logs = action_logs[-20:]
+    text = "📜 <b>Последние действия:</b>\n\n"
+    for log in reversed(last_logs):
+        text += f"🕐 <code>{log['time']}</code>\n"
+        text += f"👤 {log['user']}\n"
+        text += f"➡️ {log['action']}\n\n"
+    
+    await message.reply(text, parse_mode="HTML")
+
+
+@dp.message_handler(commands=["quote"])
+async def cmd_quote(message: types.Message):
+    if message.chat.type != "private" or message.from_user.id != ADMIN_ID:
+        return
+    
+    quote, author = get_unused_quote()
+    await bot.send_message(
+        GROUP_ID,
+        f"💬 <i>«{quote}»</i>\n— <b>{author}</b>",
+        parse_mode="HTML",
+        message_thread_id=CHAT_TOPIC_ID
+    )
+    await message.reply("✅ Цитата отправлена!")
 
 
 @dp.message_handler(commands=["upcoming"])
@@ -332,6 +528,7 @@ async def handle_message(message: types.Message):
 async def section_chosen(call: types.CallbackQuery):
     section = call.data.split(":")[1]
     label = "📋 Stratbook" if section == "strat" else "💣 Nades"
+    log_action(call.from_user, f"Открыл {label}")
     await call.message.edit_text(
         f"{label}\n\n🗺️ <b>Выбери карту:</b>",
         parse_mode="HTML",
@@ -343,6 +540,8 @@ async def section_chosen(call: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data.startswith("map:"))
 async def map_chosen(call: types.CallbackQuery):
     _, section, map_id = call.data.split(":")
+    section_name = "Stratbook" if section == "strat" else "Nades"
+    log_action(call.from_user, f"Открыл {section_name} — {map_id.upper()}")
 
     if section == "strat":
         link = STRAT_BOOKS.get(map_id)
@@ -370,7 +569,7 @@ async def map_chosen(call: types.CallbackQuery):
 
     await call.answer()
 
-    await asyncio.sleep(5)
+    await asyncio.sleep(15)
     try:
         await call.message.edit_text(
             "📚 <b>EGOIST STRATBOOK</b>\n\nВыбери раздел и получи нужную информацию:",
