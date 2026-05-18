@@ -39,7 +39,7 @@ def main_menu():
     """Главное меню — выбор раздела"""
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
-        InlineKeyboardButton("📋 Страт бук", callback_data="section:strat"),
+        InlineKeyboardButton("📋 Stratbook", callback_data="section:strat"),
         InlineKeyboardButton("💣 Nades", callback_data="section:nades"),
     )
     return kb
@@ -83,7 +83,7 @@ async def handle_message(message: types.Message):
 @dp.callback_query_handler(lambda c: c.data.startswith("section:"))
 async def section_chosen(call: types.CallbackQuery):
     section = call.data.split(":")[1]
-    label = "📋 Страт бук" if section == "strat" else "💣 Nades"
+    label = "📋 Stratbook" if section == "strat" else "💣 Nades"
     await call.message.edit_text(
         f"{label}\n\n🗺️ <b>Выбери карту:</b>",
         parse_mode="HTML",
@@ -100,10 +100,10 @@ async def map_chosen(call: types.CallbackQuery):
         link = STRAT_BOOKS.get(map_id)
         if link:
             kb = InlineKeyboardMarkup()
-            kb.add(InlineKeyboardButton("📋 Открыть страт бук", url=link))
+            kb.add(InlineKeyboardButton("📋 Открыть Stratbook", url=link))
             kb.add(InlineKeyboardButton("⬅️ Назад", callback_data=f"section:strat"))
             await call.message.edit_text(
-                f"📋 <b>Страт бук — {map_id.upper()}</b>",
+                f"📋 <b>Stratbook — {map_id.upper()}</b>",
                 parse_mode="HTML",
                 reply_markup=kb
             )
@@ -111,7 +111,7 @@ async def map_chosen(call: types.CallbackQuery):
             kb = InlineKeyboardMarkup()
             kb.add(InlineKeyboardButton("⬅️ Назад", callback_data=f"section:strat"))
             await call.message.edit_text(
-                f"😔 Страт бук для <b>{map_id.upper()}</b> пока не добавлен",
+                f"😔 Stratbook для <b>{map_id.upper()}</b> пока не добавлен",
                 parse_mode="HTML",
                 reply_markup=kb
             )
