@@ -11,6 +11,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 GROUP_ID = -1003680698112  # ID группы команды
 STRATBOOK_TOPIC_ID = 1542  # ID топика STRATBOOK
+ADMIN_ID = 557066322  # Твой Telegram ID
 
 STRAT_BOOKS = {
     "mirage": "https://docs.google.com/document/d/1KfaADUAV4jy2QqHyjUlAJ5rBd9SQuFokAmQN86DDHEE/edit?tab=t.5w09v52hr780",
@@ -74,6 +75,10 @@ def map_menu(section: str):
 async def cmd_notify(message: types.Message):
     if message.chat.type != "private":
         await message.delete()
+        return
+
+    if message.from_user.id != ADMIN_ID:
+        await message.reply("⛔️ У тебя нет доступа к этой команде.")
         return
 
     text = message.text.replace("/notify", "").strip()
