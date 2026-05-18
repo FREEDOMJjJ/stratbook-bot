@@ -1,17 +1,13 @@
 import os
-import asyncio
 import logging
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message
+from aiogram import Bot, Dispatcher, executor, types
 
 # ============================
 # 🔧 НАСТРОЙКИ
 # ============================
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # Получить у @BotFather
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Ключевые слова -> ссылки (можно добавлять любые)
 MIRAGE_LINK = "https://docs.google.com/document/d/1KfaADUAV4jy2QqHyjUlAJ5rBd9SQuFokAmQN86DDHEE/edit?tab=t.5w09v52hr780"
-
 DUST2_LINK = "https://docs.google.com/document/d/1o_B5xguuRmTO1lw2b9NB7sphzWZFvlEiQaU2VKlbzDU/edit?tab=t.5w09v52hr780"
 
 MAP_LINKS = {
@@ -23,8 +19,6 @@ MAP_LINKS = {
     "даст":      DUST2_LINK,
     "dust2":     DUST2_LINK,
     "dust 2":    DUST2_LINK,
-    # Остальные карты — добавляй по аналогии:
-    # "inferno": "https://...",
 }
 
 # ============================
@@ -32,27 +26,21 @@ MAP_LINKS = {
 # ============================
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+dp = Dispatcher(bot)
 
 
-@dp.message(F.text)
-async def handle_message(message: Message):
+@dp.message_handler()
+async def handle_message(message: types.Message):
     text = message.text.lower().strip()
 
-    # Проверяем каждое ключевое слово
     for keyword, link in MAP_LINKS.items():
         if keyword in text:
             await message.reply(
-                f"📍 <b>{keyword.upper()}</b>\n"
-                f"🔗 {link}",
+                f"📍 <b>{keyword.upper()}</b>\n🔗 {link}",
                 parse_mode="HTML"
             )
-            return  # Отвечаем только на первое совпадение
-
-
-async def main():
-    await dp.start_polling(bot)
+            return
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    executor.start_polling(dp, skip_updates=True)
