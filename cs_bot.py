@@ -13,6 +13,8 @@ GROUP_ID = -1003680698112  # ID группы команды
 STRATBOOK_TOPIC_ID = 1542  # ID топика STRATBOOK
 ADMIN_ID = 557066322  # Твой Telegram ID
 
+INSTA_LINK = "https://docs.google.com/spreadsheets/d/1C4ZIfJKl4WvnCkH3eVB7v0lw7N94pyYZwj98VPhOcTk/edit?gid=1511020141#gid=1511020141"
+
 STRAT_BOOKS = {
     "mirage": "https://docs.google.com/document/d/1KfaADUAV4jy2QqHyjUlAJ5rBd9SQuFokAmQN86DDHEE/edit?tab=t.5w09v52hr780",
     "dust2":  "https://docs.google.com/document/d/1o_B5xguuRmTO1lw2b9NB7sphzWZFvlEiQaU2VKlbzDU/edit?tab=t.5w09v52hr780",
@@ -67,6 +69,8 @@ def map_menu(section: str):
         InlineKeyboardButton("Dust 2", callback_data=f"map:{section}:dust2"),
         InlineKeyboardButton("Ancient", callback_data=f"map:{section}:ancient"),
     )
+    if section == "nades":
+        kb.add(InlineKeyboardButton("⚡️ Insta", url=INSTA_LINK))
     kb.add(InlineKeyboardButton("⬅️ Назад", callback_data="back:main"))
     return kb
 
