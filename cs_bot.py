@@ -212,6 +212,18 @@ async def map_chosen(call: types.CallbackQuery):
 
     await call.answer()
 
+    # Автовозврат в главное меню через 30 секунд
+    await asyncio.sleep(30)
+    try:
+        await call.message.edit_text(
+            "📚 <b>EGOIST STRATBOOK</b>\n\n"
+            "Выбери раздел и получи нужную информацию:",
+            parse_mode="HTML",
+            reply_markup=main_menu()
+        )
+    except Exception:
+        pass
+
 
 @dp.callback_query_handler(lambda c: c.data == "back:main")
 async def back_to_main(call: types.CallbackQuery):
