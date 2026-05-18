@@ -1,3 +1,4 @@
+import os
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher, F
@@ -6,7 +7,7 @@ from aiogram.types import Message
 # ============================
 # 🔧 НАСТРОЙКИ
 # ============================
-BOT_TOKEN = "8994726744:AAFqZTkSYbtxgFxE_S6ZCJCfJbUsNGn6YOs"  # Получить у @BotFather
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # Получить у @BotFather
 
 # Ключевые слова -> ссылки (можно добавлять любые)
 MIRAGE_LINK = "https://docs.google.com/document/d/1KfaADUAV4jy2QqHyjUlAJ5rBd9SQuFokAmQN86DDHEE/edit?tab=t.5w09v52hr780"
