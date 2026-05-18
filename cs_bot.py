@@ -29,6 +29,17 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
 
 
+@dp.message_handler(commands=["maps"])
+async def cmd_maps(message: types.Message):
+    await message.reply(
+        "🗺️ <b>Доступные карты:</b>\n\n"
+        "• <b>Mirage</b> — напиши <code>mirage</code> или <code>мираж</code>\n"
+        "• <b>Dust 2</b> — напиши <code>dust2</code> или <code>даст</code>\n\n"
+        "Напиши название карты и получишь ссылку на страт бук!",
+        parse_mode="HTML"
+    )
+
+
 @dp.message_handler()
 async def handle_message(message: types.Message):
     text = message.text.lower().strip()
