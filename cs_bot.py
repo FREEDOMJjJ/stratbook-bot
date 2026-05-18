@@ -75,7 +75,24 @@ def map_menu(section: str):
     return kb
 
 
-@dp.message_handler(commands=["post"])
+PINNED_MESSAGE_ID = None  # Бот запомнит ID своего сообщения
+
+
+async def on_startup(dp):
+    global PINNED_MESSAGE_ID
+    try:
+        msg = await bot.send_message(
+            GROUP_ID,
+            "📚 <b>EGOIST STRATBOOK</b>\n\n"
+            "Выбери раздел и получи нужную информацию:",
+            parse_mode="HTML",
+            message_thread_id=STRATBOOK_TOPIC_ID,
+            reply_markup=main_menu()
+        )
+        PINNED_MESSAGE_ID = msg.message_id
+        await bot.pin_chat_message(GROUP_ID, msg.message_id, disable_notification=True)
+    except Exception as e:
+        logging.error(f"Ошибка при отправке стартового сообщения: {e}")
 async def cmd_post(message: types.Message):
     if message.chat.type != "private":
         await message.delete()
@@ -237,4 +254,4 @@ async def back_to_main(call: types.CallbackQuery):
 
 
 if __name__ == "__main__":
-    executor.start_polling(dp, skip_updates=True)
+    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
