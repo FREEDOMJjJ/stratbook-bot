@@ -12,7 +12,7 @@ from googleapiclient.discovery import build
 # 🔧 НАСТРОЙКИ
 # ============================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")  # JSON ключа сервисного аккаунта
+GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
 CALENDAR_ID = "85f813a348453bc70b98c82024ac2d7db492896a82798537ce2a4e7175a0feb3@group.calendar.google.com"
 
 GROUP_ID = -1003680698112
@@ -43,9 +43,8 @@ MAP_KEYWORDS = {
     "ancient": "ancient",
 }
 
-# Файл для хранения уже обработанных событий
 PROCESSED_EVENTS_FILE = "/tmp/processed_events.json"
-processed_events = {}  # {event_id: {"notified_day": bool, "notified_hour_half": bool, "notified_hour": bool}}
+processed_events = {}
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
@@ -68,7 +67,6 @@ def save_processed():
 
 
 def get_calendar_service():
-    """Создаёт сервис Google Calendar"""
     try:
         creds_info = json.loads(GOOGLE_CREDS_JSON)
         creds = service_account.Credentials.from_service_account_info(
@@ -82,7 +80,6 @@ def get_calendar_service():
 
 
 async def fetch_calendar_events():
-    """Получает события из календаря на ближайшие 7 дней"""
     service = get_calendar_service()
     if not service:
         return []
@@ -105,11 +102,11 @@ async def fetch_calendar_events():
 
 
 async def check_calendar_loop():
-    """Проверяет календарь каждые 10 минут"""
     while True:
         try:
             events = await fetch_calendar_events()
             now = datetime.now(timezone.utc)
+            moscow_tz = timezone(timedelta(hours=3))
 
             for event in events:
                 event_id = event['id']
@@ -120,28 +117,26 @@ async def check_calendar_loop():
                     continue
 
                 event_time = datetime.fromisoformat(start.replace('Z', '+00:00'))
+                local_time = event_time.astimezone(moscow_tz)
+                date_str = local_time.strftime("%d.%m.%Y")
+                time_str = local_time.strftime("%H:%M")
 
                 if event_id not in processed_events:
                     processed_events[event_id] = {
                         "notified_new": False,
                         "notified_day": False,
-                        "notified_hour_half": False,
                         "notified_hour": False
                     }
 
                 state = processed_events[event_id]
                 time_until = event_time - now
-                moscow_tz = timezone(timedelta(hours=3))
-                local_time = event_time.astimezone(moscow_tz)
-                date_str = local_time.strftime("%d.%m.%Y")
-                time_str = local_time.strftime("%H:%M")
 
-                # Уведомление о новом праке (не удаляется)
+                # Уведомление о новом праке
                 if not state["notified_new"]:
                     await bot.send_message(
                         GROUP_ID,
-                        f"🎮 <b>НОВЫЙ ПРАК ИЗ КАЛЕНДАРЯ!</b>
-📅 <i>(синхронизируется с Google Calendar и Pracc.com)</i>\n\n"
+                        f"🎮 <b>НОВЫЙ ПРАК ИЗ КАЛЕНДАРЯ!</b>\n"
+                        f"📅 <i>(синхронизируется с Google Calendar и Pracc.com)</i>\n\n"
                         f"🗺 {summary}\n"
                         f"📅 {date_str} в {time_str}\n\n"
                         f"{PLAYERS}",
@@ -151,12 +146,12 @@ async def check_calendar_loop():
                     state["notified_new"] = True
                     save_processed()
 
-                # За сутки (удалится через 24 часа)
+                # За сутки
                 if not state["notified_day"] and timedelta(hours=23, minutes=50) < time_until <= timedelta(hours=24, minutes=10):
                     sent = await bot.send_message(
                         GROUP_ID,
-                        f"🔔 <b>Напоминание! Прак завтра!</b>
-📅 <i>(из Google Calendar и Pracc.com)</i>\n\n"
+                        f"🔔 <b>Напоминание! Прак завтра!</b>\n"
+                        f"📅 <i>(из Google Calendar и Pracc.com)</i>\n\n"
                         f"🗺 {summary}\n"
                         f"📅 {date_str} в {time_str}\n\n"
                         f"{PLAYERS}",
@@ -167,12 +162,12 @@ async def check_calendar_loop():
                     save_processed()
                     asyncio.create_task(auto_delete(sent, 82800))
 
-                # За час (удалится через 24 часа)
+                # За час
                 if not state["notified_hour"] and timedelta(minutes=50) < time_until <= timedelta(hours=1, minutes=10):
                     sent = await bot.send_message(
                         GROUP_ID,
-                        f"⏰ <b>Через час прак!</b>
-📅 <i>(из Google Calendar и Pracc.com)</i>\n\n"
+                        f"⏰ <b>Через час прак!</b>\n"
+                        f"📅 <i>(из Google Calendar и Pracc.com)</i>\n\n"
                         f"🗺 {summary}\n"
                         f"🕐 {time_str}\n\n"
                         f"{PLAYERS}",
@@ -186,7 +181,7 @@ async def check_calendar_loop():
         except Exception as e:
             logging.error(f"Ошибка в check_calendar_loop: {e}")
 
-        await asyncio.sleep(600)  # Проверка каждые 10 минут
+        await asyncio.sleep(600)
 
 
 async def auto_delete(message: types.Message, delay: int = 60):
@@ -259,14 +254,14 @@ async def cmd_upcoming(message: types.Message):
         await message.reply("📭 Праков в ближайшую неделю нет.")
         return
 
+    moscow_tz = timezone(timedelta(hours=3))
     text = "📅 <b>Ближайшие праки:</b>\n\n"
     for event in events[:10]:
         summary = event.get('summary', 'Прак')
         start = event['start'].get('dateTime', event['start'].get('date'))
         if 'T' in start:
             event_time = datetime.fromisoformat(start.replace('Z', '+00:00'))
-            moscow_tz = timezone(timedelta(hours=3))
-                local_time = event_time.astimezone(moscow_tz)
+            local_time = event_time.astimezone(moscow_tz)
             date_str = local_time.strftime("%d.%m.%Y %H:%M")
             text += f"🗺 {summary} — {date_str}\n"
 
