@@ -71,6 +71,27 @@ def map_menu(section: str):
     return kb
 
 
+@dp.message_handler(commands=["post"])
+async def cmd_post(message: types.Message):
+    if message.chat.type != "private":
+        await message.delete()
+        return
+
+    if message.from_user.id != ADMIN_ID:
+        await message.reply("⛔️ У тебя нет доступа к этой команде.")
+        return
+
+    await bot.send_message(
+        GROUP_ID,
+        "📚 <b>EGOIST STRATBOOK</b>\n\n"
+        "Выбери раздел и получи нужную информацию:",
+        parse_mode="HTML",
+        message_thread_id=STRATBOOK_TOPIC_ID,
+        reply_markup=main_menu()
+    )
+    await message.reply("✅ Сообщение отправлено в STRATBOOK — закрепи его!")
+
+
 @dp.message_handler(commands=["notify"])
 async def cmd_notify(message: types.Message):
     if message.chat.type != "private":
