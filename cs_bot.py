@@ -10,7 +10,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 GROUP_ID = -1003680698112  # ID группы команды
-ADMIN_ID = None  # Твой Telegram ID — заполним после
+STRATBOOK_TOPIC_ID = 1542  # ID топика STRATBOOK
 
 STRAT_BOOKS = {
     "mirage": "https://docs.google.com/document/d/1KfaADUAV4jy2QqHyjUlAJ5rBd9SQuFokAmQN86DDHEE/edit?tab=t.5w09v52hr780",
@@ -83,8 +83,9 @@ async def cmd_notify(message: types.Message):
 
     await bot.send_message(
         GROUP_ID,
-        f"🔔 <b>Обновление от тренера!</b>\n\n{text}",
-        parse_mode="HTML"
+        f"🔔 <b>Обновление от 5 LVL FACEIT!</b>\n\n{text}",
+        parse_mode="HTML",
+        message_thread_id=STRATBOOK_TOPIC_ID
     )
     await message.reply("✅ Уведомление отправлено в группу!")
 
