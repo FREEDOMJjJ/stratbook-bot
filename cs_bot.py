@@ -75,24 +75,21 @@ def map_menu(section: str):
     return kb
 
 
-PINNED_MESSAGE_ID = None  # Бот запомнит ID своего сообщения
+PINNED_MESSAGE_ID = 1707  # ID закреплённого сообщения
 
 
 async def on_startup(dp):
-    global PINNED_MESSAGE_ID
     try:
-        msg = await bot.send_message(
-            GROUP_ID,
+        await bot.edit_message_text(
             "📚 <b>EGOIST STRATBOOK</b>\n\n"
             "Выбери раздел и получи нужную информацию:",
+            chat_id=GROUP_ID,
+            message_id=PINNED_MESSAGE_ID,
             parse_mode="HTML",
-            message_thread_id=STRATBOOK_TOPIC_ID,
             reply_markup=main_menu()
         )
-        PINNED_MESSAGE_ID = msg.message_id
-        await bot.pin_chat_message(GROUP_ID, msg.message_id, disable_notification=True)
     except Exception as e:
-        logging.error(f"Ошибка при отправке стартового сообщения: {e}")
+        logging.error(f"Ошибка при редактировании сообщения: {e}")
 async def cmd_post(message: types.Message):
     if message.chat.type != "private":
         await message.delete()
@@ -229,8 +226,8 @@ async def map_chosen(call: types.CallbackQuery):
 
     await call.answer()
 
-    # Автовозврат в главное меню через 30 секунд
-    await asyncio.sleep(30)
+    # Автовозврат в главное меню через 5 секунд
+    await asyncio.sleep(5)
     try:
         await call.message.edit_text(
             "📚 <b>EGOIST STRATBOOK</b>\n\n"
