@@ -11,7 +11,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 GROUP_ID = -1003680698112  # ID группы команды
 STRATBOOK_TOPIC_ID = 1542  # ID топика STRATBOOK
+SCRIMS_TOPIC_ID = 15  # ID топика ПРАКИ
 ADMIN_ID = 557066322  # Твой Telegram ID
+
+PLAYERS = "@Rogachev_E @gladnessorrow @YakobsMonarch0_0 @FREEDOM5O"
 
 INSTA_LINK = "https://docs.google.com/spreadsheets/d/1C4ZIfJKl4WvnCkH3eVB7v0lw7N94pyYZwj98VPhOcTk/edit?gid=1511020141#gid=1511020141"
 
@@ -76,6 +79,7 @@ def map_menu(section: str):
 
 
 PINNED_MESSAGE_ID = 1707  # ID закреплённого сообщения
+scrims = []  # Список праков
 
 
 async def on_startup(dp):
@@ -90,6 +94,51 @@ async def on_startup(dp):
         )
     except Exception as e:
         logging.error(f"Ошибка при редактировании сообщения: {e}")
+
+
+@dp.message_handler(commands=["scrim"])
+async def cmd_scrim(message: types.Message):
+    if message.chat.type != "private":
+        await message.delete()
+        return
+    if message.from_user.id != ADMIN_ID:
+        await message.reply("⛔️ У тебя нет доступа к этой команде.")
+        return
+
+    args = message.text.replace("/scrim", "").strip()
+    if not args:
+        await message.reply("✏️ Формат: /scrim Mirage 20:00 Пятница 23.05")
+        return
+
+    scrims.append(args)
+    scrim_list = "\n".join([f"🗺 {s}" for s in scrims])
+    text = (
+        f"🎮 <b>РАСПИСАНИЕ ПРАКОВ</b>\n\n"
+        f"{scrim_list}\n\n"
+        f"{PLAYERS}"
+    )
+    await bot.send_message(
+        GROUP_ID,
+        text,
+        parse_mode="HTML",
+        message_thread_id=SCRIMS_TOPIC_ID
+    )
+    await message.reply(f"✅ Прак добавлен! Всего праков: {len(scrims)}")
+
+
+@dp.message_handler(commands=["clearscrim"])
+async def cmd_clearscrim(message: types.Message):
+    if message.chat.type != "private":
+        await message.delete()
+        return
+    if message.from_user.id != ADMIN_ID:
+        await message.reply("⛔️ У тебя нет доступа к этой команде.")
+        return
+    scrims.clear()
+    await message.reply("✅ Список праков очищен!")
+
+
+@dp.message_handler(commands=["post"])
 async def cmd_post(message: types.Message):
     if message.chat.type != "private":
         await message.delete()
