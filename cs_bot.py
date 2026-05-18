@@ -1,4 +1,5 @@
 import os
+import asyncio
 import logging
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -35,6 +36,15 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
 
 
+async def auto_delete(message: types.Message, delay: int = 60):
+    """Удаляет сообщение бота через delay секунд"""
+    await asyncio.sleep(delay)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
 def main_menu():
     """Главное меню — выбор раздела"""
     kb = InlineKeyboardMarkup(row_width=2)
@@ -59,11 +69,12 @@ def map_menu(section: str):
 
 @dp.message_handler(commands=["maps"])
 async def cmd_maps(message: types.Message):
-    await message.reply(
+    sent = await message.reply(
         "🗺️ <b>Выбери раздел:</b>",
         parse_mode="HTML",
         reply_markup=main_menu()
     )
+    asyncio.create_task(auto_delete(sent))
 
 
 @dp.message_handler()
@@ -72,11 +83,12 @@ async def handle_message(message: types.Message):
 
     for keyword, map_id in MAP_KEYWORDS.items():
         if keyword in text:
-            await message.reply(
+            sent = await message.reply(
                 f"📍 <b>{map_id.upper()}</b>\nВыбери раздел:",
                 parse_mode="HTML",
                 reply_markup=main_menu()
             )
+            asyncio.create_task(auto_delete(sent))
             return
 
 
