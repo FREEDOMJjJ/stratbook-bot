@@ -922,8 +922,8 @@ async def on_startup(dp: Dispatcher) -> None:
             parse_mode="HTML", reply_markup=main_menu()
         )
         log.info("✓ Pinned message updated")
-    except Exception as e:
-        log.error(f"update pinned: {e}")
+    except Exception:
+        log.info("ℹ️ Pinned message not updated (use /post to create new)")
     
     # Автоматически отправляем кнопку календаря в ПРАКИ при первом запуске
     try:
@@ -1038,7 +1038,8 @@ async def cmd_testapi(message: Message) -> None:
     if not is_admin_private(message):
         return
     
-    base = f"https://worker-production-40d6.up.railway.app"
+    base = f"https://stratbook-bot-production.up.railway.app"
+    # Если Railway изменит домен — обновляй WEBAPP_URL и этот URL тоже
     results = []
     
     import aiohttp
@@ -1270,12 +1271,21 @@ async def cmd_upcoming(message: Message) -> None:
 async def cmd_post(message: Message) -> None:
     if not is_admin_private(message):
         return
-    await bot.send_message(
-        GROUP_ID, MAIN_MENU_TEXT,
-        parse_mode="HTML", message_thread_id=STRATBOOK_TOPIC_ID,
-        reply_markup=main_menu()
-    )
-    await message.reply("✅ Отправлено!")
+    try:
+        sent = await bot.send_message(
+            GROUP_ID, MAIN_MENU_TEXT,
+            parse_mode="HTML", message_thread_id=STRATBOOK_TOPIC_ID,
+            reply_markup=main_menu()
+        )
+        try:
+            await bot.pin_chat_message(GROUP_ID, sent.message_id, disable_notification=True)
+        except Exception as e:
+            log.error(f"pin post: {e}")
+        await message.reply(f"✅ Отправлено и закреплено!\nID: <code>{sent.message_id}</code>", parse_mode="HTML")
+        log.info(f"✓ New pinned message ID: {sent.message_id}")
+    except Exception as e:
+        log.error(f"cmd_post: {e}")
+        await message.reply(f"❌ Ошибка: {e}")
 
 
 @dp.message_handler(commands=["notify"])
