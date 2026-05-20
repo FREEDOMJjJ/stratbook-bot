@@ -625,7 +625,7 @@ async def notify_full_house(slot_date: str, slot_time: str, usernames: List[str]
         tags = " ".join(f"@{u}" for u in usernames if u)
         
         kb = InlineKeyboardMarkup()
-        kb.add(InlineKeyboardButton("📅 Открыть календарь", web_app=WebAppInfo(url=WEBAPP_URL)))
+        kb.add(InlineKeyboardButton("📅 Открыть календарь", url=WEBAPP_URL))
         
         await bot.send_message(
             GROUP_ID,
@@ -833,6 +833,17 @@ def main_menu() -> InlineKeyboardMarkup:
         InlineKeyboardButton("📋 Stratbook", callback_data="section:strat"),
         InlineKeyboardButton("💣 Nades", callback_data="section:nades"),
     )
+    kb.add(InlineKeyboardButton("📅 Календарь", url=WEBAPP_URL))
+    return kb
+
+
+def main_menu_webapp() -> InlineKeyboardMarkup:
+    """Меню с WebApp кнопкой — только для личных сообщений."""
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("📋 Stratbook", callback_data="section:strat"),
+        InlineKeyboardButton("💣 Nades", callback_data="section:nades"),
+    )
     kb.add(InlineKeyboardButton("📅 Календарь", web_app=WebAppInfo(url=WEBAPP_URL)))
     return kb
 
@@ -931,7 +942,7 @@ async def on_startup(dp: Dispatcher) -> None:
         today = date.today().isoformat()
         if last_startup != today:
             kb = InlineKeyboardMarkup()
-            kb.add(InlineKeyboardButton("📅 Открыть календарь", web_app=WebAppInfo(url=WEBAPP_URL)))
+            kb.add(InlineKeyboardButton("📅 Открыть календарь", url=WEBAPP_URL))
             await bot.send_message(
                 GROUP_ID,
                 "📅 <b>Календарь сборов команды</b>\n\n"
@@ -1024,7 +1035,7 @@ async def cmd_testwebapp(message: Message) -> None:
         try:
             kb = InlineKeyboardMarkup()
             kb.add(InlineKeyboardButton("📅 Открыть тест", web_app=WebAppInfo(url=url)))
-            text += "✅ Кнопка создана успешно!"
+            text += "✅ Кнопка создана успешно!\n(WebApp работает только в личке бота)"
             await message.reply(text, parse_mode="HTML", reply_markup=kb)
         except Exception as e:
             text += f"❌ Ошибка создания кнопки:\n<code>{e}</code>"
@@ -1176,7 +1187,10 @@ async def cmd_myid(message: Message) -> None:
 async def cmd_calendar(message: Message) -> None:
     try:
         kb = InlineKeyboardMarkup()
-        kb.add(InlineKeyboardButton("📅 Открыть календарь", web_app=WebAppInfo(url=WEBAPP_URL)))
+        if message.chat.type == "private":
+            kb.add(InlineKeyboardButton("📅 Открыть календарь", web_app=WebAppInfo(url=WEBAPP_URL)))
+        else:
+            kb.add(InlineKeyboardButton("📅 Открыть календарь", url=WEBAPP_URL))
         await message.reply(
             "📅 <b>Календарь сборов</b>\n\n"
             "Отметь когда можешь играть на ближайшие 14 дней.\n"
@@ -1193,7 +1207,7 @@ async def cmd_calendarpost(message: Message) -> None:
     if not is_admin_private(message):
         return
     kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("📅 Открыть календарь", web_app=WebAppInfo(url=WEBAPP_URL)))
+    kb.add(InlineKeyboardButton("📅 Открыть календарь", url=WEBAPP_URL))
     sent = await bot.send_message(
         GROUP_ID,
         "📅 <b>Календарь сборов команды</b>\n\n"
