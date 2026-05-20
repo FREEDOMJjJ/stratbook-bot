@@ -1,4 +1,4 @@
-"""1
+"""
 EGOIST CS2 Telegram Bot - with Availability Mini App
 @stratbook_bot
 """
