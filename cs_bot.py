@@ -936,6 +936,17 @@ async def on_startup(dp: Dispatcher) -> None:
     except Exception:
         log.info("ℹ️ Pinned message not updated (use /post to create new)")
     
+    # Устанавливаем Menu Button — открывает Mini App в Telegram
+    try:
+        await bot.set_chat_menu_button(menu_button={
+            "type": "web_app",
+            "text": "📅 Календарь",
+            "web_app": {"url": WEBAPP_URL}
+        })
+        log.info("✓ Menu button set")
+    except Exception as e:
+        log.error(f"set menu button: {e}")
+
     # Автоматический calendarpost убран — используй /calendarpost вручную
     log.info("✅ Bot is ready!")
 
