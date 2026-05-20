@@ -936,28 +936,7 @@ async def on_startup(dp: Dispatcher) -> None:
     except Exception:
         log.info("ℹ️ Pinned message not updated (use /post to create new)")
     
-    # Автоматически отправляем кнопку календаря в ПРАКИ при первом запуске
-    try:
-        last_startup = await db_get_state("last_calendarpost")
-        today = date.today().isoformat()
-        if last_startup != today:
-            kb = InlineKeyboardMarkup()
-            kb.add(InlineKeyboardButton("📅 Открыть календарь", url=WEBAPP_URL))
-            await bot.send_message(
-                GROUP_ID,
-                "📅 <b>Календарь сборов команды</b>\n\n"
-                "Отметь когда можешь играть на ближайшие 14 дней.\n"
-                "Когда все 5 в сборе — бот сразу сообщит!\n\n"
-                "🌅 Утро (10-14) • 🌇 День (14-19) • 🌃 Вечер (19-23)",
-                parse_mode="HTML",
-                message_thread_id=SCRIMS_TOPIC_ID,
-                reply_markup=kb
-            )
-            await db_set_state("last_calendarpost", today)
-            log.info("✓ Auto calendarpost sent")
-    except Exception as e:
-        log.error(f"auto calendarpost: {e}")
-    
+    # Автоматический calendarpost убран — используй /calendarpost вручную
     log.info("✅ Bot is ready!")
 
 
