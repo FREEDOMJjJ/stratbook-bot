@@ -46,10 +46,14 @@ CHAT_TOPIC_ID = 13
 ADMIN_ID = 557066322
 PINNED_MESSAGE_ID = 1707
 
-# Default team (admin only — добавь остальных через /addplayer)
+# Default team (все 5 игроков с тегами)
 DEFAULT_TEAM = {
     557066322: {"username": "FREEDOM5O", "display": "FREEDOM"},
+    # Остальные 4 добавятся с PLAYERS_TAG автоматически
 }
+
+# Динамически добавляем остальных из PLAYERS_TAG
+TEAM_PLAYERS_TAGS = ["Rogachev_E", "gladnessorrow", "YakobsMonarch0_0", "FREEDOM5O"]
 
 TIME_SLOTS = [
     {"id": "morning", "name": "Утро", "emoji": "🌅", "hours": "10-14"},
@@ -206,6 +210,18 @@ async def db_init() -> None:
                 INSERT INTO team_players (user_id, username, display_name)
                 VALUES ($1, $2, $3) ON CONFLICT (user_id) DO NOTHING
             """, user_id, info["username"], info["display"])
+        
+        # Add other team members from TEAM_PLAYERS_TAGS
+        other_team = [
+            (100001, "Rogachev_E", "Rogachev"),
+            (100002, "gladnessorrow", "Gladness"),
+            (100003, "YakobsMonarch0_0", "Yakobs"),
+        ]
+        for user_id, username, display in other_team:
+            await conn.execute("""
+                INSERT INTO team_players (user_id, username, display_name)
+                VALUES ($1, $2, $3) ON CONFLICT (user_id) DO NOTHING
+            """, user_id, username, display)
     
     log.info("✓ Tables ready")
 
@@ -537,7 +553,7 @@ async def setup_api(app: web.Application) -> None:
     ]
     
     for path, method, handler in routes:
-        resource = cors.add(app.router.add_resource(path))
+        resource = app.router.add_resource(path)
         cors.add(resource.add_route(method, handler))
 
 
@@ -879,9 +895,7 @@ async def cmd_help(message: Message) -> None:
         "🔄 /restart — перезапустить бота\n"
         "🩺 /status — статус бота\n"
         "👥 /team — состав команды\n"
-        "➕ /addplayer ID username display — добавить игрока\n"
         "🆔 /id — узнать ID топика\n"
-        "🆔 /myid — узнать свой ID (для игроков)\n"
         "📖 /maps — меню карт",
         parse_mode="HTML"
     )
@@ -918,31 +932,6 @@ async def cmd_team(message: Message) -> None:
     for p in team:
         text += f"• <code>{p['user_id']}</code> @{p['username']} ({p['display_name']})\n"
     await message.reply(text, parse_mode="HTML")
-
-
-@dp.message_handler(commands=["addplayer"])
-async def cmd_addplayer(message: Message) -> None:
-    if not is_admin_private(message):
-        return
-    parts = message.text.split(maxsplit=3)
-    if len(parts) < 4:
-        await message.reply(
-            "ℹ️ Использование:\n"
-            "<code>/addplayer USER_ID username display_name</code>\n\n"
-            "USER_ID можно узнать попросив игрока написать боту /myid",
-            parse_mode="HTML"
-        )
-        return
-    try:
-        user_id = int(parts[1])
-        username = parts[2].lstrip("@")
-        display = parts[3]
-        if await db_add_player(user_id, username, display):
-            await message.reply(f"✅ Добавлен: @{username} ({display})")
-        else:
-            await message.reply("❌ Ошибка")
-    except ValueError:
-        await message.reply("❌ USER_ID должен быть числом")
 
 
 @dp.message_handler(commands=["myid"])
