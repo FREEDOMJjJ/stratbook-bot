@@ -946,14 +946,18 @@ async def cmd_myid(message: Message) -> None:
 
 @dp.message_handler(commands=["calendar"])
 async def cmd_calendar(message: Message) -> None:
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("📅 Открыть календарь", web_app=WebAppInfo(url=WEBAPP_URL)))
-    await message.reply(
-        "📅 <b>Календарь сборов</b>\n\n"
-        "Отметь когда можешь играть на ближайшие 14 дней.\n"
-        "Когда все 5 готовы — бот сразу уведомит!",
-        parse_mode="HTML", reply_markup=kb
-    )
+    try:
+        kb = InlineKeyboardMarkup()
+        kb.add(InlineKeyboardButton("📅 Открыть календарь", web_app=WebAppInfo(url=WEBAPP_URL)))
+        await message.reply(
+            "📅 <b>Календарь сборов</b>\n\n"
+            "Отметь когда можешь играть на ближайшие 14 дней.\n"
+            "Когда все 5 готовы — бот сразу уведомит!",
+            parse_mode="HTML", reply_markup=kb
+        )
+    except Exception as e:
+        log.error(f"cmd_calendar error: {e}")
+        await message.reply(f"📅 Открой календарь: {WEBAPP_URL}")
 
 
 @dp.message_handler(commands=["calendarpost"])
@@ -1073,11 +1077,15 @@ async def cmd_id(message: Message) -> None:
 
 @dp.message_handler(commands=["maps"])
 async def cmd_maps(message: Message) -> None:
-    sent = await message.reply(
-        "🗺️ <b>Выбери раздел:</b>",
-        parse_mode="HTML", reply_markup=main_menu()
-    )
-    asyncio.create_task(auto_delete(sent))
+    try:
+        sent = await message.reply(
+            "🗺️ <b>Выбери раздел:</b>",
+            parse_mode="HTML", reply_markup=main_menu()
+        )
+        asyncio.create_task(auto_delete(sent))
+    except Exception as e:
+        log.error(f"cmd_maps error: {e}")
+        await message.reply("🗺️ Stratbook | Nades | Календарь")
 
 
 @dp.message_handler()
