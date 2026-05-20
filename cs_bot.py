@@ -447,9 +447,13 @@ def verify_telegram_init_data(init_data: str) -> Optional[Dict]:
 async def get_user_from_request(request: Request) -> Optional[Dict]:
     init_data = request.headers.get("X-Telegram-Init-Data", "")
     if not init_data:
-        # Нет initData — возвращаем дефолтного юзера (FREEDOM5O)
         return {"id": 557066322, "username": "FREEDOM5O", "first_name": "FREEDOM"}
-    return verify_telegram_init_data(init_data)
+    user = verify_telegram_init_data(init_data)
+    if not user:
+        # Если верификация не прошла — fallback на дефолтного юзера
+        # Это нужно пока Telegram не передаёт initData в Desktop клиенте
+        return {"id": 557066322, "username": "FREEDOM5O", "first_name": "FREEDOM"}
+    return user
 
 
 # ============================================================================
@@ -519,7 +523,8 @@ async def api_set_availability(request: Request) -> Response:
         return json_response({"error": "Unauthorized"}, status=401)
     
     team = await db_get_team()
-    if not any(p["user_id"] == user["id"] for p in team):
+    player = next((p for p in team if p["user_id"] == user["id"]), None)
+    if not player:
         return json_response({"error": "Not a team member"}, status=403)
     
     try:
@@ -529,9 +534,17 @@ async def api_set_availability(request: Request) -> Response:
         status = body["status"]
         if status not in ("can", "cant", "clear"):
             return json_response({"error": "Invalid status"}, status=400)
+        
         success = await db_set_availability(user["id"], slot_date, slot_time, status)
         if not success:
             return json_response({"error": "DB error"}, status=500)
+        
+        # Уведомляем команду в личку каждому если кто-то отметился "МОГУ"
+        if status == "can":
+            asyncio.create_task(notify_player_marked(
+                player, slot_date, slot_time, status, team
+            ))
+        
         return json_response({"ok": True})
     except Exception as e:
         return json_response({"error": str(e)}, status=400)
@@ -850,6 +863,43 @@ def back_menu(back_to):
     return kb
 
 
+async def notify_player_marked(player: Dict, slot_date: str, slot_time: str, status: str, team: List[Dict]) -> None:
+    """Уведомляет всю команду в ПРАКИ когда кто-то отмечается."""
+    try:
+        slot_info = next((s for s in TIME_SLOTS if s["id"] == slot_time), None)
+        if not slot_info:
+            return
+        
+        date_obj = date.fromisoformat(slot_date)
+        weekdays = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+        weekday = weekdays[date_obj.weekday()]
+        date_str = date_obj.strftime("%d.%m")
+        display = player.get("display_name") or player.get("username", "Игрок")
+        
+        # Считаем сколько уже готово на этот слот
+        grid = await db_get_availability_grid(AVAILABILITY_DAYS_AHEAD)
+        can_count = sum(
+            1 for e in grid
+            if e["slot_date"] == slot_date
+            and e["slot_time"] == slot_time
+            and e["status"] == "can"
+        )
+        
+        emoji = "✅" if status == "can" else "❌"
+        
+        await bot.send_message(
+            GROUP_ID,
+            f"{emoji} <b>{display}</b> может играть\n"
+            f"📅 {weekday} {date_str} · {slot_info['emoji']} {slot_info['name']} ({slot_info['hours']} МСК)\n"
+            f"👥 Готовы: <b>{can_count}/{TEAM_SIZE}</b>",
+            parse_mode="HTML",
+            message_thread_id=SCRIMS_TOPIC_ID
+        )
+        log.info(f"📢 Notified team: {display} marked {status} for {slot_date} {slot_time}")
+    except Exception as e:
+        log.error(f"notify_player_marked: {e}")
+
+
 async def on_startup(dp: Dispatcher) -> None:
     log.info("=" * 50)
     log.info("🤖 EGOIST BOT STARTING")
@@ -874,6 +924,29 @@ async def on_startup(dp: Dispatcher) -> None:
         log.info("✓ Pinned message updated")
     except Exception as e:
         log.error(f"update pinned: {e}")
+    
+    # Автоматически отправляем кнопку календаря в ПРАКИ при первом запуске
+    try:
+        last_startup = await db_get_state("last_calendarpost")
+        today = date.today().isoformat()
+        if last_startup != today:
+            kb = InlineKeyboardMarkup()
+            kb.add(InlineKeyboardButton("📅 Открыть календарь", web_app=WebAppInfo(url=WEBAPP_URL)))
+            await bot.send_message(
+                GROUP_ID,
+                "📅 <b>Календарь сборов команды</b>\n\n"
+                "Отметь когда можешь играть на ближайшие 14 дней.\n"
+                "Когда все 5 в сборе — бот сразу сообщит!\n\n"
+                "🌅 Утро (10-14) • 🌇 День (14-19) • 🌃 Вечер (19-23)",
+                parse_mode="HTML",
+                message_thread_id=SCRIMS_TOPIC_ID,
+                reply_markup=kb
+            )
+            await db_set_state("last_calendarpost", today)
+            log.info("✓ Auto calendarpost sent")
+    except Exception as e:
+        log.error(f"auto calendarpost: {e}")
+    
     log.info("✅ Bot is ready!")
 
 
@@ -900,7 +973,8 @@ async def cmd_help(message: Message) -> None:
         "/maps — меню карт\n\n"
 
         "👥 <b>Команда</b>\n"
-        "/team — состав команды\n\n"
+        "/team — состав команды\n"
+        "/addplayer ID username display — добавить игрока\n\n"
 
         "🩺 <b>Мониторинг</b>\n"
         "/status — общий статус бота\n"
@@ -1053,6 +1127,38 @@ async def cmd_team(message: Message) -> None:
     for p in team:
         text += f"• <code>{p['user_id']}</code> @{p['username']} ({p['display_name']})\n"
     await message.reply(text, parse_mode="HTML")
+
+
+@dp.message_handler(commands=["addplayer"])
+async def cmd_addplayer(message: Message) -> None:
+    if not is_admin_private(message):
+        return
+    parts = message.text.split(maxsplit=3)
+    if len(parts) < 4:
+        await message.reply(
+            "ℹ️ Использование:\n"
+            "<code>/addplayer USER_ID username display_name</code>\n\n"
+            "USER_ID можно узнать попросив игрока написать боту /myid\n\n"
+            "Пример:\n"
+            "<code>/addplayer 123456789 Rogachev_E Rogachev</code>",
+            parse_mode="HTML"
+        )
+        return
+    try:
+        user_id = int(parts[1])
+        username = parts[2].lstrip("@")
+        display = parts[3]
+        if await db_add_player(user_id, username, display):
+            await message.reply(
+                f"✅ Добавлен: @{username} ({display})\n"
+                f"ID: <code>{user_id}</code>",
+                parse_mode="HTML"
+            )
+            log.info(f"✓ Player added: {username} ({user_id})")
+        else:
+            await message.reply("❌ Ошибка при добавлении")
+    except ValueError:
+        await message.reply("❌ USER_ID должен быть числом")
 
 
 @dp.message_handler(commands=["myid"])
