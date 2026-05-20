@@ -447,9 +447,7 @@ def verify_telegram_init_data(init_data: str) -> Optional[Dict]:
 async def get_user_from_request(request: Request) -> Optional[Dict]:
     init_data = request.headers.get("X-Telegram-Init-Data", "")
     if not init_data:
-        # Fallback для теста — используем админа (FREEDOM5O)
-        # В продакшене это должно быть отключено
-        return {"id": 557066322, "username": "FREEDOM5O", "first_name": "FREEDOM"}
+        return None
     return verify_telegram_init_data(init_data)
 
 
@@ -462,14 +460,16 @@ async def api_health(request: Request) -> Response:
 
 
 async def api_me(request: Request) -> Response:
-    # Fallback для теста — всегда возвращаем админа
-    user = {"id": 557066322, "username": "FREEDOM5O", "first_name": "FREEDOM"}
+    user = await get_user_from_request(request)
+    if not user:
+        return json_response({"error": "Unauthorized"}, status=401)
     team = await db_get_team()
+    is_member = any(p["user_id"] == user["id"] for p in team)
     return json_response({
         "id": user["id"],
         "username": user.get("username", ""),
         "first_name": user.get("first_name", ""),
-        "is_team_member": True
+        "is_team_member": is_member
     })
 
 
@@ -479,8 +479,9 @@ async def api_team(request: Request) -> Response:
 
 
 async def api_availability_grid(request: Request) -> Response:
-    # Fallback user для теста
-    user = {"id": 557066322}
+    user = await get_user_from_request(request)
+    if not user:
+        return json_response({"error": "Unauthorized"}, status=401)
     
     grid = await db_get_availability_grid(AVAILABILITY_DAYS_AHEAD)
     aggregated = {}
@@ -884,21 +885,140 @@ async def cmd_help(message: Message) -> None:
     if not is_admin_private(message):
         return
     await message.reply(
-        "📋 <b>Команды:</b>\n\n"
-        "📅 /calendar — открыть календарь сборов\n"
-        "📌 /calendarpost — закрепить кнопку календаря в ПРАКАХ\n"
-        "📅 /upcoming — ближайшие праки\n"
-        "💬 /quote — отправить цитату\n"
-        "📜 /logs — последние действия\n"
-        "🔔 /notify текст — уведомление\n"
-        "📌 /post — закреплённое сообщение\n"
-        "🔄 /restart — перезапустить бота\n"
-        "🩺 /status — статус бота\n"
-        "👥 /team — состав команды\n"
-        "🆔 /id — узнать ID топика\n"
-        "📖 /maps — меню карт",
+        "📋 <b>Команды EGOIST BOT</b>\n\n"
+
+        "📅 <b>Календарь</b>\n"
+        "/calendar — открыть календарь сборов\n"
+        "/calendarpost — закрепить кнопку в ПРАКАХ\n"
+        "/upcoming — ближайшие праки из Google Calendar\n\n"
+
+        "📣 <b>Группа</b>\n"
+        "/notify текст — отправить уведомление\n"
+        "/post — обновить закреплённое сообщение\n"
+        "/quote — отправить цитату дня\n"
+        "/maps — меню карт\n\n"
+
+        "👥 <b>Команда</b>\n"
+        "/team — состав команды\n\n"
+
+        "🩺 <b>Мониторинг</b>\n"
+        "/status — общий статус бота\n"
+        "/ping — быстрая проверка\n"
+        "/testwebapp — тест WebApp кнопки\n"
+        "/testapi — тест API эндпоинтов\n"
+        "/testdb — тест базы данных\n"
+        "/logs — последние действия\n\n"
+
+        "⚙️ <b>Система</b>\n"
+        "/restart — перезапустить бота\n"
+        "/id — узнать ID топика\n"
+        "/myid — узнать свой Telegram ID",
         parse_mode="HTML"
     )
+
+
+@dp.message_handler(commands=["ping"])
+async def cmd_ping(message: Message) -> None:
+    if not is_admin_private(message):
+        return
+    now = datetime.now(MOSCOW_TZ).strftime("%H:%M:%S")
+    await message.reply(
+        f"🏓 <b>PONG!</b>\n\n"
+        f"🌐 WEBAPP_URL: <code>{WEBAPP_URL}</code>\n"
+        f"🕐 Время МСК: <code>{now}</code>\n"
+        f"💾 БД: {'✅' if db_pool else '❌'}",
+        parse_mode="HTML"
+    )
+
+
+@dp.message_handler(commands=["testwebapp"])
+async def cmd_testwebapp(message: Message) -> None:
+    if not is_admin_private(message):
+        return
+    url = WEBAPP_URL
+    is_valid = url.startswith("https://")
+    status = "✅ валидный HTTPS" if is_valid else "❌ невалидный URL (нужен https://)"
+    
+    text = (
+        f"🔍 <b>Тест WebApp</b>\n\n"
+        f"🌐 URL: <code>{url}</code>\n"
+        f"📋 Статус: {status}\n\n"
+    )
+    
+    if is_valid:
+        try:
+            kb = InlineKeyboardMarkup()
+            kb.add(InlineKeyboardButton("📅 Открыть тест", web_app=WebAppInfo(url=url)))
+            text += "✅ Кнопка создана успешно!"
+            await message.reply(text, parse_mode="HTML", reply_markup=kb)
+        except Exception as e:
+            text += f"❌ Ошибка создания кнопки:\n<code>{e}</code>"
+            await message.reply(text, parse_mode="HTML")
+    else:
+        await message.reply(text, parse_mode="HTML")
+
+
+@dp.message_handler(commands=["testapi"])
+async def cmd_testapi(message: Message) -> None:
+    if not is_admin_private(message):
+        return
+    
+    base = f"https://worker-production-40d6.up.railway.app"
+    results = []
+    
+    import aiohttp
+    async with aiohttp.ClientSession() as session:
+        for path in ["/api/health", "/api/me", "/api/availability"]:
+            try:
+                async with session.get(f"{base}{path}", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    data = await resp.text()
+                    short = data[:80].replace('\n', ' ')
+                    results.append(f"✅ <code>{path}</code>\n    {short}")
+            except Exception as e:
+                results.append(f"❌ <code>{path}</code>\n    {str(e)[:80]}")
+    
+    text = f"🔍 <b>Тест API</b>\n🌐 {base}\n\n" + "\n\n".join(results)
+    await message.reply(text, parse_mode="HTML")
+
+
+@dp.message_handler(commands=["testdb"])
+async def cmd_testdb(message: Message) -> None:
+    if not is_admin_private(message):
+        return
+    
+    results = []
+    
+    try:
+        async with db_pool.acquire() as conn:
+            # Проверяем таблицы
+            tables = await conn.fetch("""
+                SELECT tablename FROM pg_tables WHERE schemaname = 'public'
+            """)
+            table_names = [r['tablename'] for r in tables]
+            results.append(f"✅ Подключение к БД")
+            results.append(f"📋 Таблицы: <code>{', '.join(table_names)}</code>")
+            
+            # Игроки
+            players = await conn.fetchval("SELECT COUNT(*) FROM team_players")
+            results.append(f"👥 Игроков в команде: <b>{players}/{TEAM_SIZE}</b>")
+            
+            # Слоты availability
+            slots = await conn.fetchval("SELECT COUNT(*) FROM availability")
+            results.append(f"📅 Слотов availability: <b>{slots}</b>")
+            
+            # Логи
+            logs = await conn.fetchval("SELECT COUNT(*) FROM action_logs")
+            results.append(f"📜 Записей в логах: <b>{logs}</b>")
+            
+            # Последний запуск
+            last_startup = await db_get_state("last_startup")
+            results.append(f"🚀 Последний запуск: <code>{last_startup or '-'}</code>")
+            
+    except Exception as e:
+        results.append(f"❌ Ошибка БД: <code>{e}</code>")
+    
+    text = "🔍 <b>Тест БД</b>\n\n" + "\n".join(results)
+    await message.reply(text, parse_mode="HTML")
 
 
 @dp.message_handler(commands=["status"])
