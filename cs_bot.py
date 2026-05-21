@@ -55,11 +55,7 @@ DEFAULT_TEAM = {
 # Динамически добавляем остальных из PLAYERS_TAG
 TEAM_PLAYERS_TAGS = ["Rogachev_E", "gladnessorrow", "YakobsMonarch0_0", "FREEDOM5O"]
 
-TIME_SLOTS = [
-    {"id": "morning", "name": "Утро", "emoji": "🌅", "hours": "10-14"},
-    {"id": "day", "name": "День", "emoji": "🌇", "hours": "14-19"},
-    {"id": "evening", "name": "Вечер", "emoji": "🌃", "hours": "19-23"},
-]
+TIME_SLOT_DEFAULT = "anytime"  # единственный слот
 
 CALENDAR_CHECK_INTERVAL = 600
 QUOTE_CHECK_INTERVAL = 300
@@ -189,20 +185,29 @@ async def db_init() -> None:
             CREATE TABLE IF NOT EXISTS availability (
                 user_id BIGINT,
                 slot_date DATE,
-                slot_time TEXT,
+                time_text TEXT DEFAULT 'anytime',
                 status TEXT DEFAULT 'can',
                 updated_at TIMESTAMP DEFAULT NOW(),
-                PRIMARY KEY (user_id, slot_date, slot_time)
+                PRIMARY KEY (user_id, slot_date)
             );
             CREATE TABLE IF NOT EXISTS avail_notifications (
                 slot_date DATE,
-                slot_time TEXT,
                 count INTEGER,
                 notified_at TIMESTAMP DEFAULT NOW(),
-                PRIMARY KEY (slot_date, slot_time, count)
+                PRIMARY KEY (slot_date, count)
             );
             CREATE INDEX IF NOT EXISTS idx_availability_date 
-                ON availability (slot_date, slot_time, status);
+                ON availability (slot_date, status);
+            -- Migration: add time_text if old schema existed
+            DO $$ BEGIN
+                IF EXISTS (SELECT 1 FROM information_schema.columns 
+                           WHERE table_name='availability' AND column_name='slot_time') THEN
+                    ALTER TABLE availability ADD COLUMN IF NOT EXISTS time_text TEXT DEFAULT 'anytime';
+                    ALTER TABLE availability DROP CONSTRAINT IF EXISTS availability_pkey;
+                    ALTER TABLE availability ADD PRIMARY KEY (user_id, slot_date);
+                END IF;
+            EXCEPTION WHEN others THEN NULL;
+            END $$;
         """)
         
         for user_id, info in DEFAULT_TEAM.items():
@@ -347,20 +352,21 @@ async def db_add_player(user_id: int, username: str, display_name: str) -> bool:
         return False
 
 
-async def db_set_availability(user_id: int, slot_date: str, slot_time: str, status: str) -> bool:
+async def db_set_availability(user_id: int, slot_date: str, time_text: str, status: str) -> bool:
+    """Записать доступность. time_text = "ALL DAY" / "18:00" / "anytime" / etc."""
     try:
         async with db_pool.acquire() as conn:
             if status == "clear":
                 await conn.execute("""
-                    DELETE FROM availability WHERE user_id = $1 AND slot_date = $2 AND slot_time = $3
-                """, user_id, date.fromisoformat(slot_date), slot_time)
+                    DELETE FROM availability WHERE user_id = $1 AND slot_date = $2
+                """, user_id, date.fromisoformat(slot_date))
             else:
                 await conn.execute("""
-                    INSERT INTO availability (user_id, slot_date, slot_time, status, updated_at)
+                    INSERT INTO availability (user_id, slot_date, time_text, status, updated_at)
                     VALUES ($1, $2, $3, $4, NOW())
-                    ON CONFLICT (user_id, slot_date, slot_time) 
-                    DO UPDATE SET status = EXCLUDED.status, updated_at = NOW()
-                """, user_id, date.fromisoformat(slot_date), slot_time, status)
+                    ON CONFLICT (user_id, slot_date)
+                    DO UPDATE SET status = EXCLUDED.status, time_text = EXCLUDED.time_text, updated_at = NOW()
+                """, user_id, date.fromisoformat(slot_date), time_text, status)
             return True
     except Exception as e:
         log.error(f"db_set_availability: {e}")
@@ -373,17 +379,17 @@ async def db_get_availability_grid(days_ahead: int = 14) -> List[Dict[str, Any]]
             today = date.today()
             end_date = today + timedelta(days=days_ahead)
             rows = await conn.fetch("""
-                SELECT a.slot_date, a.slot_time, a.status, a.user_id,
+                SELECT a.slot_date, a.time_text, a.status, a.user_id,
                        tp.username, tp.display_name
                 FROM availability a
                 LEFT JOIN team_players tp ON tp.user_id = a.user_id
                 WHERE a.slot_date >= $1 AND a.slot_date <= $2
-                ORDER BY a.slot_date, a.slot_time
+                ORDER BY a.slot_date, a.updated_at
             """, today, end_date)
             return [
                 {
                     "slot_date": r["slot_date"].isoformat(),
-                    "slot_time": r["slot_time"],
+                    "time_text": r["time_text"] or "anytime",
                     "status": r["status"],
                     "user_id": r["user_id"],
                     "username": r["username"],
@@ -396,26 +402,26 @@ async def db_get_availability_grid(days_ahead: int = 14) -> List[Dict[str, Any]]
         return []
 
 
-async def db_was_notified(slot_date: str, slot_time: str, count: int) -> bool:
+async def db_was_notified(slot_date: str, count: int) -> bool:
     try:
         async with db_pool.acquire() as conn:
             row = await conn.fetchrow("""
                 SELECT 1 FROM avail_notifications
-                WHERE slot_date = $1 AND slot_time = $2 AND count = $3
-            """, date.fromisoformat(slot_date), slot_time, count)
+                WHERE slot_date = $1 AND count = $2
+            """, date.fromisoformat(slot_date), count)
             return row is not None
     except Exception as e:
         log.error(f"db_was_notified: {e}")
         return True
 
 
-async def db_mark_notified(slot_date: str, slot_time: str, count: int) -> None:
+async def db_mark_notified(slot_date: str, count: int) -> None:
     try:
         async with db_pool.acquire() as conn:
             await conn.execute("""
-                INSERT INTO avail_notifications (slot_date, slot_time, count)
-                VALUES ($1, $2, $3) ON CONFLICT DO NOTHING
-            """, date.fromisoformat(slot_date), slot_time, count)
+                INSERT INTO avail_notifications (slot_date, count)
+                VALUES ($1, $2) ON CONFLICT DO NOTHING
+            """, date.fromisoformat(slot_date), count)
     except Exception as e:
         log.error(f"db_mark_notified: {e}")
 
@@ -489,19 +495,20 @@ async def api_availability_grid(request: Request) -> Response:
         return json_response({"error": "Unauthorized"}, status=401)
     
     grid = await db_get_availability_grid(AVAILABILITY_DAYS_AHEAD)
+    # Группируем по дате — один слот на день
     aggregated = {}
     for entry in grid:
-        key = f"{entry['slot_date']}_{entry['slot_time']}"
+        key = entry["slot_date"]
         if key not in aggregated:
             aggregated[key] = {
                 "slot_date": entry["slot_date"],
-                "slot_time": entry["slot_time"],
                 "can": [], "cant": []
             }
         player = {
             "user_id": entry["user_id"],
             "username": entry["username"],
-            "display_name": entry["display_name"]
+            "display_name": entry["display_name"],
+            "time_text": entry["time_text"]
         }
         if entry["status"] == "can":
             aggregated[key]["can"].append(player)
@@ -512,8 +519,7 @@ async def api_availability_grid(request: Request) -> Response:
         "slots": list(aggregated.values()),
         "team_size": TEAM_SIZE,
         "days_ahead": AVAILABILITY_DAYS_AHEAD,
-        "your_id": user["id"],
-        "time_slots": TIME_SLOTS
+        "your_id": user["id"]
     })
 
 
@@ -530,20 +536,14 @@ async def api_set_availability(request: Request) -> Response:
     try:
         body = await request.json()
         slot_date = body["slot_date"]
-        slot_time = body["slot_time"]
+        time_text = body.get("time_text", "anytime")  # "ALL DAY", "18:00", "anytime", etc.
         status = body["status"]
         if status not in ("can", "cant", "clear"):
             return json_response({"error": "Invalid status"}, status=400)
         
-        success = await db_set_availability(user["id"], slot_date, slot_time, status)
+        success = await db_set_availability(user["id"], slot_date, time_text, status)
         if not success:
             return json_response({"error": "DB error"}, status=500)
-        
-        # Уведомляем команду в личку каждому если кто-то отметился "МОГУ"
-        if status == "can":
-            asyncio.create_task(notify_player_marked(
-                player, slot_date, slot_time, status, team
-            ))
         
         return json_response({"ok": True})
     except Exception as e:
@@ -595,6 +595,66 @@ async def availability_watcher() -> None:
                 continue
             
             grid = await db_get_availability_grid(AVAILABILITY_DAYS_AHEAD)
+            # Группируем по дате
+            days: Dict[str, Dict] = {}
+            for entry in grid:
+                d = entry["slot_date"]
+                if d not in days:
+                    days[d] = {"date": d, "can": [], "cant": []}
+                if entry["status"] == "can" and entry["username"]:
+                    days[d]["can"].append(entry["username"])
+                elif entry["status"] == "cant" and entry["username"]:
+                    days[d]["cant"].append(entry["username"])
+            
+            for day in days.values():
+                count = len(day["can"])
+                if count == 5:
+                    if not await db_was_notified(day["date"], 5):
+                        await notify_full_house(day["date"], day["can"])
+                        await db_mark_notified(day["date"], 5)
+                elif count == 4:
+                    if not await db_was_notified(day["date"], 4):
+                        await notify_partial_house(day["date"], day["can"], 4)
+                        await db_mark_notified(day["date"], 4)
+                elif count == 3:
+                    if not await db_was_notified(day["date"], 3):
+                        await notify_partial_house(day["date"], day["can"], 3)
+                        await db_mark_notified(day["date"], 3)
+        except Exception as e:
+            log.error(f"availability_watcher: {e}")
+        await asyncio.sleep(AVAIL_CHECK_INTERVAL)
+                continue
+            
+            grid = await db_get_availability_grid(AVAILABILITY_DAYS_AHEAD)
+            slots = {}
+            for entry in grid:
+                key = f"{entry['slot_date']}_{entry['slot_time']}"
+                if key not in slots:
+                    slots[key] = {"date": entry["slot_date"], "time": entry["slot_time"], "can": []}
+                if entry["status"] == "can" and entry["username"]:
+                    slots[key]["can"].append(entry["username"])
+            
+            for slot in slots.values():
+                count = len(slot["can"])
+                # Уведомления: только при 3, 4 или 5 готовых
+                if count == 5:
+                    if not await db_was_notified(slot["date"], slot["time"], 5):
+                        await notify_full_house(slot["date"], slot["time"], slot["can"])
+                        await db_mark_notified(slot["date"], slot["time"], 5)
+                elif count == 4:
+                    if not await db_was_notified(slot["date"], slot["time"], 4):
+                        await notify_partial_house(slot["date"], slot["time"], slot["can"], 4)
+                        await db_mark_notified(slot["date"], slot["time"], 4)
+                elif count == 3:
+                    if not await db_was_notified(slot["date"], slot["time"], 3):
+                        await notify_partial_house(slot["date"], slot["time"], slot["can"], 3)
+                        await db_mark_notified(slot["date"], slot["time"], 3)
+        except Exception as e:
+            log.error(f"availability_watcher: {e}")
+        await asyncio.sleep(AVAIL_CHECK_INTERVAL)
+                continue
+            
+            grid = await db_get_availability_grid(AVAILABILITY_DAYS_AHEAD)
             slots = {}
             for entry in grid:
                 key = f"{entry['slot_date']}_{entry['slot_time']}"
@@ -613,34 +673,55 @@ async def availability_watcher() -> None:
         await asyncio.sleep(AVAIL_CHECK_INTERVAL)
 
 
-async def notify_full_house(slot_date: str, slot_time: str, usernames: List[str]) -> None:
+
+
+async def notify_partial_house(slot_date: str, usernames: List[str], count: int) -> None:
+    """Уведомление когда 3 или 4 человека готовы."""
     try:
-        slot_info = next((s for s in TIME_SLOTS if s["id"] == slot_time), None)
-        if not slot_info:
-            return
         date_obj = date.fromisoformat(slot_date)
         weekdays = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
         weekday = weekdays[date_obj.weekday()]
         date_str = date_obj.strftime("%d.%m.%Y")
         tags = " ".join(f"@{u}" for u in usernames if u)
         
-        kb = InlineKeyboardMarkup()
-        kb.add(InlineKeyboardButton("📅 Открыть календарь", url=WEBAPP_URL))
+        emoji = "🔥" if count == 4 else "⚡"
+        header = "ПОЧТИ ГОТОВО!" if count == 4 else "ГАЗ ФАСЛО!"
+        tail = "Ждём ещё одного!" if count == 4 else "Ещё двое и можем играть!"
+        
+        await bot.send_message(
+            GROUP_ID,
+            f"{emoji} <b>{header}</b>\n\n"
+            f"📅 {weekday}, {date_str}\n"
+            f"👥 Готовы: <b>{count}/{TEAM_SIZE}</b>\n\n"
+            f"{tags}\n\n"
+            f"🎯 {tail}",
+            parse_mode="HTML",
+            message_thread_id=SCRIMS_TOPIC_ID
+        )
+        log.info(f"⚡ Partial house notification: {count}/{TEAM_SIZE} for {slot_date}")
+    except Exception as e:
+        log.error(f"notify_partial_house: {e}")
+
+async def notify_full_house(slot_date: str, usernames: List[str]) -> None:
+    try:
+        date_obj = date.fromisoformat(slot_date)
+        weekdays = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+        weekday = weekdays[date_obj.weekday()]
+        date_str = date_obj.strftime("%d.%m.%Y")
+        tags = " ".join(f"@{u}" for u in usernames if u)
         
         await bot.send_message(
             GROUP_ID,
             f"🔥 <b>ВСЕ В СБОРЕ!</b>\n\n"
-            f"📅 {weekday}, {date_str}\n"
-            f"{slot_info['emoji']} {slot_info['name']} ({slot_info['hours']} МСК)\n\n"
+            f"📅 {weekday}, {date_str}\n\n"
             f"{tags}\n\n"
             f"🎯 Можем играть прак!\n"
             f"• Создавайте событие в Google Calendar\n"
             f"• Ищите противника на Pracc.com",
             parse_mode="HTML",
-            message_thread_id=SCRIMS_TOPIC_ID,
-            reply_markup=kb
+            message_thread_id=SCRIMS_TOPIC_ID
         )
-        log.info(f"🔥 Full house notification: {slot_date} {slot_time}")
+        log.info(f"🔥 Full house notification: {slot_date}")
     except Exception as e:
         log.error(f"notify_full_house: {e}")
 
@@ -873,42 +954,6 @@ def back_menu(back_to):
     kb.add(InlineKeyboardButton("⬅️ Назад", callback_data=back_to))
     return kb
 
-
-async def notify_player_marked(player: Dict, slot_date: str, slot_time: str, status: str, team: List[Dict]) -> None:
-    """Уведомляет всю команду в ПРАКИ когда кто-то отмечается."""
-    try:
-        slot_info = next((s for s in TIME_SLOTS if s["id"] == slot_time), None)
-        if not slot_info:
-            return
-        
-        date_obj = date.fromisoformat(slot_date)
-        weekdays = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-        weekday = weekdays[date_obj.weekday()]
-        date_str = date_obj.strftime("%d.%m")
-        display = player.get("display_name") or player.get("username", "Игрок")
-        
-        # Считаем сколько уже готово на этот слот
-        grid = await db_get_availability_grid(AVAILABILITY_DAYS_AHEAD)
-        can_count = sum(
-            1 for e in grid
-            if e["slot_date"] == slot_date
-            and e["slot_time"] == slot_time
-            and e["status"] == "can"
-        )
-        
-        emoji = "✅" if status == "can" else "❌"
-        
-        await bot.send_message(
-            GROUP_ID,
-            f"{emoji} <b>{display}</b> может играть\n"
-            f"📅 {weekday} {date_str} · {slot_info['emoji']} {slot_info['name']} ({slot_info['hours']} МСК)\n"
-            f"👥 Готовы: <b>{can_count}/{TEAM_SIZE}</b>",
-            parse_mode="HTML",
-            message_thread_id=SCRIMS_TOPIC_ID
-        )
-        log.info(f"📢 Notified team: {display} marked {status} for {slot_date} {slot_time}")
-    except Exception as e:
-        log.error(f"notify_player_marked: {e}")
 
 
 async def on_startup(dp: Dispatcher) -> None:
@@ -1163,6 +1208,30 @@ async def cmd_addplayer(message: Message) -> None:
         await message.reply("❌ USER_ID должен быть числом")
 
 
+
+@dp.message_handler(commands=["editteam"])
+async def cmd_editteam(message: Message) -> None:
+    """Редактирование списка команды (только админ)."""
+    if message.from_user.id != ADMIN_ID:
+        await message.reply("❌ Только для администратора")
+        return
+    
+    team = await db_get_team()
+    if not team:
+        await message.reply("📋 Команда пуста")
+        return
+    
+    text = "👥 <b>ТЕКУЩАЯ КОМАНДА:</b>\n\n"
+    for p in team:
+        display = p.get("display_name") or p.get("username", "Unknown")
+        username = p.get("username", "—")
+        text += f"• {display} (@{username})\n"
+    text += f"\n<i>Всего игроков: {len(team)}</i>\n\n"
+    text += "Для добавления используй: /addplayer @username"
+    
+    await db_log_action(message.from_user, "Просмотр команды")
+    await message.reply(text, parse_mode="HTML")
+
 @dp.message_handler(commands=["myid"])
 async def cmd_myid(message: Message) -> None:
     sent = await message.reply(
@@ -1328,20 +1397,6 @@ async def cmd_maps(message: Message) -> None:
         log.error(f"cmd_maps error: {e}")
         await message.reply("🗺️ Stratbook | Nades | Календарь")
 
-
-@dp.message_handler()
-async def handle_keywords(message: Message) -> None:
-    if not message.text:
-        return
-    text = message.text.lower().strip()
-    for keyword, map_id in MAP_KEYWORDS.items():
-        if keyword in text:
-            sent = await message.reply(
-                f"📍 <b>{map_id.upper()}</b>\nВыбери раздел:",
-                parse_mode="HTML", reply_markup=main_menu()
-            )
-            asyncio.create_task(auto_delete(sent))
-            return
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith("section:"))
