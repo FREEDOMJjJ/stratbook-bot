@@ -47,14 +47,16 @@ ADMIN_ID = 557066322
 BOT_USERNAME = "stratbook_bot"
 PINNED_MESSAGE_ID = 1707
 
-# Default team (все 5 игроков с тегами)
+# Default team — полный ростер 5 человек
 DEFAULT_TEAM = {
-    557066322: {"username": "FREEDOM5O", "display": "FREEDOM"},
-    # Остальные 4 добавятся с PLAYERS_TAG автоматически
+    557066322:  {"username": "FREEDOM5O",       "display": "Даня"},
+    344854915:  {"username": "gladnessorrow",   "display": "Кирилл"},
+    5322444583: {"username": "Rogachev_E",      "display": "Егорчик"},
+    537853051:  {"username": "Xcvo_same",       "display": "Юра"},
+    414553813:  {"username": "YakobsMonarch0_0","display": "Яшка"},
 }
 
-# Динамически добавляем остальных из PLAYERS_TAG
-TEAM_PLAYERS_TAGS = ["Rogachev_E", "gladnessorrow", "YakobsMonarch0_0", "FREEDOM5O"]
+TEAM_PLAYERS_TAGS = ["FREEDOM5O", "gladnessorrow", "Rogachev_E", "Xcvo_same", "YakobsMonarch0_0"]
 
 TIME_SLOT_DEFAULT = "anytime"  # единственный слот
 
@@ -73,7 +75,7 @@ TEAM_SIZE = 5
 MOSCOW_TZ = timezone(timedelta(hours=3))
 UTC = timezone.utc
 
-PLAYERS_TAG = "@FREEDOM5O @gladnessorrow @Rogachev_E @Xcvo_same"
+PLAYERS_TAG = "@FREEDOM5O @gladnessorrow @Rogachev_E @Xcvo_same @YakobsMonarch0_0"
 INSTA_LINK = "https://docs.google.com/spreadsheets/d/1C4ZIfJKl4WvnCkH3eVB7v0lw7N94pyYZwj98VPhOcTk/edit?gid=1511020141#gid=1511020141"
 MAIN_MENU_TEXT = "📚 <b>EGOIST STRATBOOK</b>\n\nВыбери раздел и получи нужную информацию:"
 
@@ -240,13 +242,22 @@ async def db_init() -> None:
             END $$;
         """)
         
+        # Удаляем игроков которых нет в актуальном ростере (заглушки 100001 и т.д.)
+        valid_ids = list(DEFAULT_TEAM.keys())
+        placeholders = ",".join(f"${i+1}" for i in range(len(valid_ids)))
+        await conn.execute(
+            f"DELETE FROM team_players WHERE user_id NOT IN ({placeholders})",
+            *valid_ids
+        )
+        # Обновляем / добавляем актуальный ростер
         for user_id, info in DEFAULT_TEAM.items():
             await conn.execute("""
                 INSERT INTO team_players (user_id, username, display_name)
-                VALUES ($1, $2, $3) ON CONFLICT (user_id) DO NOTHING
+                VALUES ($1, $2, $3)
+                ON CONFLICT (user_id) DO UPDATE
+                SET username = EXCLUDED.username,
+                    display_name = EXCLUDED.display_name
             """, user_id, info["username"], info["display"])
-        
-        # Все игроки уже в DEFAULT_TEAM выше
     
     log.info("✓ Tables ready")
 
@@ -581,11 +592,84 @@ async def api_set_availability(request: Request) -> Response:
         success = await db_set_availability(user["id"], slot_date, time_text, status)
         if not success:
             return json_response({"error": "DB error"}, status=500)
-        
+
+        # Оповещаем всех подключённых клиентов — данные изменились
+        asyncio.create_task(sse.broadcast("availability_update", f'{{"date":"{slot_date}"}}'))
+
         return json_response({"ok": True})
     except Exception as e:
         return json_response({"error": str(e)}, status=400)
 
+
+
+# ============================================================================
+# 📡 SSE — Server-Sent Events для реалтайм обновлений
+# ============================================================================
+
+class SSEManager:
+    """Держит очереди всех подключённых клиентов и рассылает события."""
+    def __init__(self):
+        self._clients: set[asyncio.Queue] = set()
+
+    def connect(self) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue()
+        self._clients.add(q)
+        log.info(f"📡 SSE client connected (total: {len(self._clients)})")
+        return q
+
+    def disconnect(self, q: asyncio.Queue) -> None:
+        self._clients.discard(q)
+        log.info(f"📡 SSE client disconnected (total: {len(self._clients)})")
+
+    async def broadcast(self, event: str, data: str = "{}") -> None:
+        if not self._clients:
+            return
+        message = f"event: {event}\ndata: {data}\n\n"
+        dead = set()
+        for q in self._clients:
+            try:
+                q.put_nowait(message)
+            except asyncio.QueueFull:
+                dead.add(q)
+        for q in dead:
+            self._clients.discard(q)
+
+sse = SSEManager()
+
+
+async def api_events(request: Request) -> web.StreamResponse:
+    """SSE endpoint — реалтайм обновления. Авторизация через ?tg= query param."""
+    tg_data = request.rel_url.query.get("tg", "")
+    if tg_data:
+        user = await verify_telegram_data(tg_data)
+        if not user:
+            return web.Response(status=401, text="Unauthorized")
+
+    resp = web.StreamResponse(headers={
+        "Content-Type":  "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection":    "keep-alive",
+        "X-Accel-Buffering": "no",
+    })
+    await resp.prepare(request)
+
+    q = sse.connect()
+    try:
+        await resp.write(b"event: connected\ndata: {}\n\n")
+        while True:
+            try:
+                msg = await asyncio.wait_for(q.get(), timeout=25)
+                await resp.write(msg.encode())
+            except asyncio.TimeoutError:
+                await resp.write(b": ping\n\n")
+            except (ConnectionResetError, BrokenPipeError):
+                break
+    except Exception as e:
+        log.debug(f"SSE disconnect: {e}")
+    finally:
+        sse.disconnect(q)
+
+    return resp
 
 async def setup_api(app: web.Application) -> None:
     cors = aiohttp_cors.setup(app, defaults={
@@ -603,6 +687,8 @@ async def setup_api(app: web.Application) -> None:
         ("/api/availability", "GET", api_availability_grid),
         ("/api/availability", "POST", api_set_availability),
     ]
+    # SSE регистрируем отдельно (streaming response, не обычный handler)
+    app.router.add_get("/api/events", api_events)
     
     for path, method, handler in routes:
         resource = app.router.add_resource(path)
@@ -1288,18 +1374,44 @@ async def cmd_myid(message: Message) -> None:
     asyncio.create_task(auto_delete(sent, 120))
 
 
+# Хранит message_id последнего сообщения /start для каждого пользователя
+# Чтобы не спамить — редактируем существующее
+_start_msg_cache: Dict[int, int] = {}
+
 @dp.message_handler(commands=["start"])
 async def cmd_start(message: Message) -> None:
-    """При /start открыть Mini App сразу если в личке."""
+    """При /start — открыть Mini App. Не спамить повторными сообщениями."""
     if message.chat.type != "private":
         return
+
+    uid = message.from_user.id
     kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("📅 Открыть календарь", web_app=WebAppInfo(url=WEBAPP_URL)))
-    await message.reply(
+    kb.add(InlineKeyboardButton(
+        "🎮 Открыть календарь EGOIST",
+        web_app=WebAppInfo(url=WEBAPP_URL)
+    ))
+
+    text = (
         f"Привет, {message.from_user.first_name}! 👋\n\n"
-        "Нажми кнопку чтобы открыть календарь команды EGOIST:",
-        reply_markup=kb
+        "Нажми кнопку чтобы отметить когда можешь играть.\n"
+        "Как только все 5 — бот тегнет команду! 🔥"
     )
+
+    # Пробуем удалить старое сообщение чтобы не было стопки
+    if uid in _start_msg_cache:
+        try:
+            await bot.delete_message(uid, _start_msg_cache[uid])
+        except Exception:
+            pass
+
+    # Удаляем само /start от пользователя
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    sent = await bot.send_message(uid, text, reply_markup=kb)
+    _start_msg_cache[uid] = sent.message_id
 
 
 @dp.message_handler(commands=["calendar"])
