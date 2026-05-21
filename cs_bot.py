@@ -187,8 +187,7 @@ async def db_init() -> None:
                 slot_date DATE,
                 time_text TEXT DEFAULT 'anytime',
                 status TEXT DEFAULT 'can',
-                updated_at TIMESTAMP DEFAULT NOW(),
-                PRIMARY KEY (user_id, slot_date)
+                updated_at TIMESTAMP DEFAULT NOW()
             );
             CREATE TABLE IF NOT EXISTS avail_notifications (
                 slot_date DATE,
@@ -198,15 +197,45 @@ async def db_init() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_availability_date 
                 ON availability (slot_date, status);
-            -- Migration: add time_text if old schema existed
-            DO $$ BEGIN
-                IF EXISTS (SELECT 1 FROM information_schema.columns 
-                           WHERE table_name='availability' AND column_name='slot_time') THEN
-                    ALTER TABLE availability ADD COLUMN IF NOT EXISTS time_text TEXT DEFAULT 'anytime';
+            -- Надёжная миграция: убираем slot_time, ставим новый PK
+            DO $$ 
+            DECLARE
+                has_slot_time BOOLEAN;
+                has_pk BOOLEAN;
+            BEGIN
+                -- Проверяем есть ли старая колонка slot_time
+                SELECT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='availability' AND column_name='slot_time'
+                ) INTO has_slot_time;
+                
+                IF has_slot_time THEN
+                    -- Дропаем все constraint на таблице
                     ALTER TABLE availability DROP CONSTRAINT IF EXISTS availability_pkey;
+                    ALTER TABLE availability DROP CONSTRAINT IF EXISTS availability_user_id_slot_date_slot_time_key;
+                    -- Удаляем дубликаты (оставляем последнюю запись для каждого user+date)
+                    DELETE FROM availability a USING availability b
+                    WHERE a.ctid < b.ctid 
+                    AND a.user_id = b.user_id 
+                    AND a.slot_date = b.slot_date;
+                    -- Добавляем time_text если нет
+                    ALTER TABLE availability ADD COLUMN IF NOT EXISTS time_text TEXT DEFAULT 'anytime';
+                    -- Убираем slot_time
+                    ALTER TABLE availability DROP COLUMN IF EXISTS slot_time;
+                    -- Новый PRIMARY KEY
                     ALTER TABLE availability ADD PRIMARY KEY (user_id, slot_date);
+                ELSE
+                    -- Таблица новая, просто убеждаемся что PK есть
+                    SELECT EXISTS (
+                        SELECT 1 FROM pg_constraint 
+                        WHERE conname = 'availability_pkey'
+                    ) INTO has_pk;
+                    IF NOT has_pk THEN
+                        ALTER TABLE availability ADD PRIMARY KEY (user_id, slot_date);
+                    END IF;
                 END IF;
-            EXCEPTION WHEN others THEN NULL;
+            EXCEPTION WHEN others THEN
+                RAISE NOTICE 'Migration warning: %', SQLERRM;
             END $$;
         """)
         
@@ -368,20 +397,25 @@ async def db_set_availability(user_id: int, slot_date: str, time_text: str, stat
     """Записать доступность. time_text = "ALL DAY" / "18:00" / "anytime" / etc."""
     try:
         async with db_pool.acquire() as conn:
+            d = date.fromisoformat(slot_date)
             if status == "clear":
-                await conn.execute("""
-                    DELETE FROM availability WHERE user_id = $1 AND slot_date = $2
-                """, user_id, date.fromisoformat(slot_date))
+                await conn.execute(
+                    "DELETE FROM availability WHERE user_id = $1 AND slot_date = $2",
+                    user_id, d
+                )
             else:
-                await conn.execute("""
-                    INSERT INTO availability (user_id, slot_date, time_text, status, updated_at)
-                    VALUES ($1, $2, $3, $4, NOW())
-                    ON CONFLICT (user_id, slot_date)
-                    DO UPDATE SET status = EXCLUDED.status, time_text = EXCLUDED.time_text, updated_at = NOW()
-                """, user_id, date.fromisoformat(slot_date), time_text, status)
+                # DELETE + INSERT надёжнее чем UPSERT при неопределённом PK
+                await conn.execute(
+                    "DELETE FROM availability WHERE user_id = $1 AND slot_date = $2",
+                    user_id, d
+                )
+                await conn.execute(
+                    "INSERT INTO availability (user_id, slot_date, time_text, status, updated_at) VALUES ($1, $2, $3, $4, NOW())",
+                    user_id, d, time_text, status
+                )
             return True
     except Exception as e:
-        log.error(f"db_set_availability: {e}")
+        log.error(f"db_set_availability error: {e}")
         return False
 
 
