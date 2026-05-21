@@ -44,6 +44,7 @@ STRATBOOK_TOPIC_ID = 1542
 SCRIMS_TOPIC_ID = 15
 CHAT_TOPIC_ID = 13
 ADMIN_ID = 557066322
+BOT_USERNAME = "stratbook_bot"
 PINNED_MESSAGE_ID = 1707
 
 # Default team (все 5 игроков с тегами)
@@ -72,7 +73,7 @@ TEAM_SIZE = 5
 MOSCOW_TZ = timezone(timedelta(hours=3))
 UTC = timezone.utc
 
-PLAYERS_TAG = "@Rogachev_E @gladnessorrow @YakobsMonarch0_0 @FREEDOM5O"
+PLAYERS_TAG = "@FREEDOM5O @gladnessorrow @Rogachev_E @Xcvo_same"
 INSTA_LINK = "https://docs.google.com/spreadsheets/d/1C4ZIfJKl4WvnCkH3eVB7v0lw7N94pyYZwj98VPhOcTk/edit?gid=1511020141#gid=1511020141"
 MAIN_MENU_TEXT = "📚 <b>EGOIST STRATBOOK</b>\n\nВыбери раздел и получи нужную информацию:"
 
@@ -245,17 +246,7 @@ async def db_init() -> None:
                 VALUES ($1, $2, $3) ON CONFLICT (user_id) DO NOTHING
             """, user_id, info["username"], info["display"])
         
-        # Add other team members from TEAM_PLAYERS_TAGS
-        other_team = [
-            (100001, "Rogachev_E", "Rogachev"),
-            (100002, "gladnessorrow", "Gladness"),
-            (100003, "YakobsMonarch0_0", "Yakobs"),
-        ]
-        for user_id, username, display in other_team:
-            await conn.execute("""
-                INSERT INTO team_players (user_id, username, display_name)
-                VALUES ($1, $2, $3) ON CONFLICT (user_id) DO NOTHING
-            """, user_id, username, display)
+        # Все игроки уже в DEFAULT_TEAM выше
     
     log.info("✓ Tables ready")
 
@@ -1297,6 +1288,20 @@ async def cmd_myid(message: Message) -> None:
     asyncio.create_task(auto_delete(sent, 120))
 
 
+@dp.message_handler(commands=["start"])
+async def cmd_start(message: Message) -> None:
+    """При /start открыть Mini App сразу если в личке."""
+    if message.chat.type != "private":
+        return
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("📅 Открыть календарь", web_app=WebAppInfo(url=WEBAPP_URL)))
+    await message.reply(
+        f"Привет, {message.from_user.first_name}! 👋\n\n"
+        "Нажми кнопку чтобы открыть календарь команды EGOIST:",
+        reply_markup=kb
+    )
+
+
 @dp.message_handler(commands=["calendar"])
 async def cmd_calendar(message: Message) -> None:
     try:
@@ -1304,7 +1309,11 @@ async def cmd_calendar(message: Message) -> None:
         if message.chat.type == "private":
             kb.add(InlineKeyboardButton("📅 Открыть календарь", web_app=WebAppInfo(url=WEBAPP_URL)))
         else:
-            kb.add(InlineKeyboardButton("📅 Открыть календарь", url=WEBAPP_URL))
+            # В группе — кнопка ведёт в личку к боту
+            kb.add(InlineKeyboardButton(
+                "📅 Открыть календарь",
+                url=f"https://t.me/{BOT_USERNAME}?start=calendar"
+            ))
         await message.reply(
             "📅 <b>Календарь сборов</b>\n\n"
             "Отметь когда можешь играть на ближайшие 14 дней.\n"
@@ -1313,21 +1322,28 @@ async def cmd_calendar(message: Message) -> None:
         )
     except Exception as e:
         log.error(f"cmd_calendar error: {e}")
-        await message.reply(f"📅 Открой календарь: {WEBAPP_URL}")
+        await message.reply(f"Открой в личке: https://t.me/{BOT_USERNAME}")
 
 
 @dp.message_handler(commands=["calendarpost"])
 async def cmd_calendarpost(message: Message) -> None:
     if not is_admin_private(message):
         return
+    # Кнопка открывает личку с ботом — там WebApp через Menu Button
     kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("📅 Открыть календарь", url=WEBAPP_URL))
+    kb.add(InlineKeyboardButton(
+        "📅 Календарь — жми сюда",
+        url=f"https://t.me/{BOT_USERNAME}?start=calendar"
+    ))
     sent = await bot.send_message(
         GROUP_ID,
-        "📅 <b>Календарь сборов команды</b>\n\n"
-        "Отметь когда можешь играть на ближайшие 14 дней.\n"
-        "Когда все 5 в сборе — бот сразу сообщит!\n\n"
-        "🌅 Утро (10-14) • 🌇 День (14-19) • 🌃 Вечер (19-23)",
+        "📅 <b>Календарь сборов EGOIST</b>\n\n"
+        "Ребят, отмечайтесь когда можете играть! 🎮\n\n"
+        "Как это работает:\n"
+        "1️⃣ Нажми кнопку ниже — откроется личка с ботом\n"
+        "2️⃣ Там нажми кнопку <b>«Календарь»</b> внизу экрана\n"
+        "3️⃣ Выбери дату и укажи время когда свободен\n\n"
+        "Как только все 5 отметятся на один день — бот сразу тегнет всех! 🔥",
         parse_mode="HTML",
         message_thread_id=SCRIMS_TOPIC_ID,
         reply_markup=kb
