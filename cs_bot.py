@@ -623,54 +623,6 @@ async def availability_watcher() -> None:
         except Exception as e:
             log.error(f"availability_watcher: {e}")
         await asyncio.sleep(AVAIL_CHECK_INTERVAL)
-                continue
-            
-            grid = await db_get_availability_grid(AVAILABILITY_DAYS_AHEAD)
-            slots = {}
-            for entry in grid:
-                key = f"{entry['slot_date']}_{entry['slot_time']}"
-                if key not in slots:
-                    slots[key] = {"date": entry["slot_date"], "time": entry["slot_time"], "can": []}
-                if entry["status"] == "can" and entry["username"]:
-                    slots[key]["can"].append(entry["username"])
-            
-            for slot in slots.values():
-                count = len(slot["can"])
-                # Уведомления: только при 3, 4 или 5 готовых
-                if count == 5:
-                    if not await db_was_notified(slot["date"], slot["time"], 5):
-                        await notify_full_house(slot["date"], slot["time"], slot["can"])
-                        await db_mark_notified(slot["date"], slot["time"], 5)
-                elif count == 4:
-                    if not await db_was_notified(slot["date"], slot["time"], 4):
-                        await notify_partial_house(slot["date"], slot["time"], slot["can"], 4)
-                        await db_mark_notified(slot["date"], slot["time"], 4)
-                elif count == 3:
-                    if not await db_was_notified(slot["date"], slot["time"], 3):
-                        await notify_partial_house(slot["date"], slot["time"], slot["can"], 3)
-                        await db_mark_notified(slot["date"], slot["time"], 3)
-        except Exception as e:
-            log.error(f"availability_watcher: {e}")
-        await asyncio.sleep(AVAIL_CHECK_INTERVAL)
-                continue
-            
-            grid = await db_get_availability_grid(AVAILABILITY_DAYS_AHEAD)
-            slots = {}
-            for entry in grid:
-                key = f"{entry['slot_date']}_{entry['slot_time']}"
-                if key not in slots:
-                    slots[key] = {"date": entry["slot_date"], "time": entry["slot_time"], "can": []}
-                if entry["status"] == "can" and entry["username"]:
-                    slots[key]["can"].append(entry["username"])
-            
-            for slot in slots.values():
-                if len(slot["can"]) == TEAM_SIZE:
-                    if not await db_was_notified(slot["date"], slot["time"], TEAM_SIZE):
-                        await notify_full_house(slot["date"], slot["time"], slot["can"])
-                        await db_mark_notified(slot["date"], slot["time"], TEAM_SIZE)
-        except Exception as e:
-            log.error(f"availability_watcher: {e}")
-        await asyncio.sleep(AVAIL_CHECK_INTERVAL)
 
 
 
