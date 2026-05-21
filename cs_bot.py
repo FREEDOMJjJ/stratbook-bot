@@ -337,6 +337,18 @@ async def db_get_team() -> List[Dict[str, Any]]:
         return []
 
 
+
+async def db_remove_player(user_id: int) -> bool:
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM team_players WHERE user_id = $1", user_id)
+            # Удалить и его доступность
+            await conn.execute("DELETE FROM availability WHERE user_id = $1", user_id)
+            return True
+    except Exception as e:
+        log.error(f"db_remove_player: {e}")
+        return False
+
 async def db_add_player(user_id: int, username: str, display_name: str) -> bool:
     try:
         async with db_pool.acquire() as conn:
@@ -972,6 +984,7 @@ async def cmd_help(message: Message) -> None:
 
         "👥 <b>Команда</b>\n"
         "/team — состав команды\n"
+        "/editteam — редактировать состав (добавить/удалить)\n"
         "/addplayer ID username display — добавить игрока\n\n"
 
         "🩺 <b>Мониторинг</b>\n"
@@ -1163,26 +1176,82 @@ async def cmd_addplayer(message: Message) -> None:
 
 @dp.message_handler(commands=["editteam"])
 async def cmd_editteam(message: Message) -> None:
-    """Редактирование списка команды (только админ)."""
+    """Редактирование состава — кнопки удаления для каждого игрока."""
     if message.from_user.id != ADMIN_ID:
         await message.reply("❌ Только для администратора")
         return
-    
+    await show_editteam(message)
+
+
+async def show_editteam(message: Message) -> None:
     team = await db_get_team()
     if not team:
-        await message.reply("📋 Команда пуста")
+        await message.reply("📋 Команда пуста\n\nДобавить: /addplayer ID @username Имя")
         return
     
-    text = "👥 <b>ТЕКУЩАЯ КОМАНДА:</b>\n\n"
+    text = f"👥 <b>КОМАНДА EGOIST</b> ({len(team)}/{TEAM_SIZE})\n\n"
     for p in team:
-        display = p.get("display_name") or p.get("username", "Unknown")
+        display = p.get("display_name") or p.get("username", "?")
         username = p.get("username", "—")
-        text += f"• {display} (@{username})\n"
-    text += f"\n<i>Всего игроков: {len(team)}</i>\n\n"
-    text += "Для добавления используй: /addplayer @username"
+        text += f"• <b>{display}</b>  @{username}\n"
+    text += "\nНажми ❌ рядом с игроком чтобы удалить:"
     
-    await db_log_action(message.from_user, "Просмотр команды")
-    await message.reply(text, parse_mode="HTML")
+    kb = InlineKeyboardMarkup(row_width=1)
+    for p in team:
+        display = p.get("display_name") or p.get("username", "?")
+        kb.add(InlineKeyboardButton(
+            f"❌ Удалить {display}",
+            callback_data=f"rmplayer:{p['user_id']}"
+        ))
+    kb.add(InlineKeyboardButton("➕ Добавить — /addplayer", callback_data="noop"))
+    
+    await message.reply(text, parse_mode="HTML", reply_markup=kb)
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("rmplayer:"))
+async def cb_remove_player(call: CallbackQuery) -> None:
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("❌ Только администратор", show_alert=True)
+        return
+    
+    uid = int(call.data.split(":")[1])
+    team = await db_get_team()
+    player = next((p for p in team if p["user_id"] == uid), None)
+    
+    if not player:
+        await call.answer("Игрок не найден", show_alert=True)
+        return
+    
+    display = player.get("display_name") or player.get("username", str(uid))
+    success = await db_remove_player(uid)
+    
+    if success:
+        await call.answer(f"✅ {display} удалён из команды")
+        # Обновить список
+        team_new = await db_get_team()
+        if not team_new:
+            await call.message.edit_text("👥 Команда пуста\n\nДобавить: /addplayer ID @username Имя", parse_mode="HTML")
+            return
+        text = f"👥 <b>КОМАНДА EGOIST</b> ({len(team_new)}/{TEAM_SIZE})\n\n"
+        for p in team_new:
+            d = p.get("display_name") or p.get("username", "?")
+            u = p.get("username", "—")
+            text += f"• <b>{d}</b>  @{u}\n"
+        text += "\nНажми ❌ рядом с игроком чтобы удалить:"
+        kb = InlineKeyboardMarkup(row_width=1)
+        for p in team_new:
+            d = p.get("display_name") or p.get("username", "?")
+            kb.add(InlineKeyboardButton(f"❌ Удалить {d}", callback_data=f"rmplayer:{p['user_id']}"))
+        kb.add(InlineKeyboardButton("➕ Добавить — /addplayer", callback_data="noop"))
+        await call.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        log.info(f"👤 Removed player {display} ({uid})")
+    else:
+        await call.answer("❌ Ошибка удаления", show_alert=True)
+
+
+@dp.callback_query_handler(lambda c: c.data == "noop")
+async def cb_noop(call: CallbackQuery) -> None:
+    await call.answer()
 
 @dp.message_handler(commands=["myid"])
 async def cmd_myid(message: Message) -> None:
