@@ -927,9 +927,13 @@ async def get_api_user(request: Request) -> Optional[Dict]:
     user = await verify_telegram_data(init_data)
     if not user:
         return None
+    # Приводим к int для надёжного сравнения
+    user_id = int(user.get("id", 0))
+    if user_id == ADMIN_ID:
+        return user
     team = await db_get_team()
-    team_ids = [p["user_id"] for p in team]
-    if user.get("id") not in team_ids and user.get("id") != ADMIN_ID:
+    team_ids = [int(p["user_id"]) for p in team]
+    if user_id not in team_ids:
         return None
     return user
 
