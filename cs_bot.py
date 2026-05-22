@@ -62,7 +62,7 @@ TIME_SLOT_DEFAULT = "anytime"  # единственный слот
 
 CALENDAR_CHECK_INTERVAL = 600
 QUOTE_CHECK_INTERVAL = 300
-AVAIL_CHECK_INTERVAL = 60
+AVAIL_CHECK_INTERVAL = 120  # проверка каждые 2 минуты
 AUTO_DELETE_DEFAULT = 60
 AUTO_DELETE_HOUR = 3600
 AUTO_DELETE_DAY = 82800
@@ -450,266 +450,70 @@ async def db_get_availability_grid(days_ahead: int = 14) -> List[Dict[str, Any]]
         return []
 
 
-async def db_was_notified(slot_date: str, count: int) -> bool:
+# In-memory кэш уведомлений — защита от спама при рестарте
+# Ключ: "slot_date:count", значение: timestamp
+# In-memory кэш уведомлений — ключ: "date:count", значение: timestamp
+_notif_cache: Dict[str, float] = {}
+_NOTIF_COOLDOWN_H = 6  # часов до повторного уведомления
+
+
+async def _already_notified(slot_date: str, count: int) -> bool:
+    """True если уже уведомляли об этом событии недавно."""
+    key = f"{slot_date}:{count}"
+    now = datetime.now().timestamp()
+    # 1. In-memory — основная защита от дублей
+    if key in _notif_cache:
+        if now - _notif_cache[key] < _NOTIF_COOLDOWN_H * 3600:
+            return True
+    # 2. БД — защита после рестарта
     try:
         async with db_pool.acquire() as conn:
-            row = await conn.fetchrow("""
-                SELECT 1 FROM avail_notifications
-                WHERE slot_date = $1 AND count = $2
-            """, date.fromisoformat(slot_date), count)
-            return row is not None
+            row = await conn.fetchrow(
+                "SELECT notified_at FROM avail_notifications WHERE slot_date=$1 AND count=$2",
+                date.fromisoformat(slot_date), count
+            )
+            if row and row["notified_at"]:
+                age_h = (datetime.now(UTC) - row["notified_at"].replace(tzinfo=UTC)).total_seconds() / 3600
+                if age_h < _NOTIF_COOLDOWN_H:
+                    _notif_cache[key] = now
+                    return True
     except Exception as e:
-        log.error(f"db_was_notified: {e}")
-        return True
+        log.error(f"_already_notified error: {e}")
+        return True  # safe default
+    return False
 
+
+async def _mark_notified(slot_date: str, count: int) -> None:
+    """Записать уведомление. INSERT ONLY — не обновляем существующее."""
+    _notif_cache[f"{slot_date}:{count}"] = datetime.now().timestamp()
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO avail_notifications (slot_date, count, notified_at) "
+                "VALUES ($1, $2, NOW()) ON CONFLICT (slot_date, count) DO NOTHING",
+                date.fromisoformat(slot_date), count
+            )
+    except Exception as e:
+        log.error(f"_mark_notified error: {e}")
+
+
+# Алиасы для совместимости
+async def db_was_notified(slot_date: str, count: int) -> bool:
+    return await _already_notified(slot_date, count)
 
 async def db_mark_notified(slot_date: str, count: int) -> None:
-    try:
-        async with db_pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO avail_notifications (slot_date, count)
-                VALUES ($1, $2) ON CONFLICT DO NOTHING
-            """, date.fromisoformat(slot_date), count)
-    except Exception as e:
-        log.error(f"db_mark_notified: {e}")
+    await _mark_notified(slot_date, count)
 
-
-# ============================================================================
-# 🔐 TELEGRAM WEB APP AUTH
-# ============================================================================
-
-def verify_telegram_init_data(init_data: str) -> Optional[Dict]:
-    try:
-        parsed = dict(parse_qsl(init_data))
-        received_hash = parsed.pop("hash", None)
-        if not received_hash:
-            return None
-        data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
-        secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
-        calculated_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-        if calculated_hash != received_hash:
-            return None
-        user_data = parsed.get("user")
-        if user_data:
-            return json.loads(user_data)
-        return None
-    except Exception as e:
-        log.error(f"verify_telegram_init_data: {e}")
-        return None
-
-
-async def get_user_from_request(request: Request) -> Optional[Dict]:
-    init_data = request.headers.get("X-Telegram-Init-Data", "")
-    if not init_data:
-        return {"id": 557066322, "username": "FREEDOM5O", "first_name": "FREEDOM"}
-    user = verify_telegram_init_data(init_data)
-    if not user:
-        # Если верификация не прошла — fallback на дефолтного юзера
-        # Это нужно пока Telegram не передаёт initData в Desktop клиенте
-        return {"id": 557066322, "username": "FREEDOM5O", "first_name": "FREEDOM"}
-    return user
-
-
-# ============================================================================
-# 🌐 API ENDPOINTS
-# ============================================================================
-
-async def api_health(request: Request) -> Response:
-    return json_response({"status": "ok", "bot": "egoist"})
-
-
-async def api_me(request: Request) -> Response:
-    user = await get_user_from_request(request)
-    if not user:
-        return json_response({"error": "Unauthorized"}, status=401)
-    team = await db_get_team()
-    is_member = any(p["user_id"] == user["id"] for p in team)
-    return json_response({
-        "id": user["id"],
-        "username": user.get("username", ""),
-        "first_name": user.get("first_name", ""),
-        "is_team_member": is_member
-    })
-
-
-async def api_team(request: Request) -> Response:
-    team = await db_get_team()
-    return json_response({"team": team, "size": TEAM_SIZE})
-
-
-async def api_availability_grid(request: Request) -> Response:
-    user = await get_user_from_request(request)
-    if not user:
-        return json_response({"error": "Unauthorized"}, status=401)
-    
-    grid = await db_get_availability_grid(AVAILABILITY_DAYS_AHEAD)
-    # Группируем по дате — один слот на день
-    aggregated = {}
-    for entry in grid:
-        key = entry["slot_date"]
-        if key not in aggregated:
-            aggregated[key] = {
-                "slot_date": entry["slot_date"],
-                "can": [], "cant": []
-            }
-        player = {
-            "user_id": entry["user_id"],
-            "username": entry["username"],
-            "display_name": entry["display_name"],
-            "time_text": entry["time_text"]
-        }
-        if entry["status"] == "can":
-            aggregated[key]["can"].append(player)
-        else:
-            aggregated[key]["cant"].append(player)
-    
-    return json_response({
-        "slots": list(aggregated.values()),
-        "team_size": TEAM_SIZE,
-        "days_ahead": AVAILABILITY_DAYS_AHEAD,
-        "your_id": user["id"]
-    })
-
-
-async def api_set_availability(request: Request) -> Response:
-    user = await get_user_from_request(request)
-    if not user:
-        return json_response({"error": "Unauthorized"}, status=401)
-    
-    team = await db_get_team()
-    player = next((p for p in team if p["user_id"] == user["id"]), None)
-    if not player:
-        return json_response({"error": "Not a team member"}, status=403)
-    
-    try:
-        body = await request.json()
-        slot_date = body["slot_date"]
-        time_text = body.get("time_text", "anytime")  # "ALL DAY", "18:00", "anytime", etc.
-        status = body["status"]
-        if status not in ("can", "cant", "clear"):
-            return json_response({"error": "Invalid status"}, status=400)
-        
-        success = await db_set_availability(user["id"], slot_date, time_text, status)
-        if not success:
-            return json_response({"error": "DB error"}, status=500)
-
-        # Оповещаем всех подключённых клиентов — данные изменились
-        asyncio.create_task(sse.broadcast("availability_update", f'{{"date":"{slot_date}"}}'))
-
-        return json_response({"ok": True})
-    except Exception as e:
-        return json_response({"error": str(e)}, status=400)
-
-
-
-# ============================================================================
-# 📡 SSE — Server-Sent Events для реалтайм обновлений
-# ============================================================================
-
-class SSEManager:
-    """Держит очереди всех подключённых клиентов и рассылает события."""
-    def __init__(self):
-        self._clients: set[asyncio.Queue] = set()
-
-    def connect(self) -> asyncio.Queue:
-        q: asyncio.Queue = asyncio.Queue()
-        self._clients.add(q)
-        log.info(f"📡 SSE client connected (total: {len(self._clients)})")
-        return q
-
-    def disconnect(self, q: asyncio.Queue) -> None:
-        self._clients.discard(q)
-        log.info(f"📡 SSE client disconnected (total: {len(self._clients)})")
-
-    async def broadcast(self, event: str, data: str = "{}") -> None:
-        if not self._clients:
-            return
-        message = f"event: {event}\ndata: {data}\n\n"
-        dead = set()
-        for q in self._clients:
-            try:
-                q.put_nowait(message)
-            except asyncio.QueueFull:
-                dead.add(q)
-        for q in dead:
-            self._clients.discard(q)
-
-sse = SSEManager()
-
-
-async def api_events(request: Request) -> web.StreamResponse:
-    """SSE endpoint — реалтайм обновления. Авторизация через ?tg= query param."""
-    tg_data = request.rel_url.query.get("tg", "")
-    if tg_data:
-        user = await verify_telegram_data(tg_data)
-        if not user:
-            return web.Response(status=401, text="Unauthorized")
-
-    resp = web.StreamResponse(headers={
-        "Content-Type":  "text/event-stream",
-        "Cache-Control": "no-cache",
-        "Connection":    "keep-alive",
-        "X-Accel-Buffering": "no",
-    })
-    await resp.prepare(request)
-
-    q = sse.connect()
-    try:
-        await resp.write(b"event: connected\ndata: {}\n\n")
-        while True:
-            try:
-                msg = await asyncio.wait_for(q.get(), timeout=25)
-                await resp.write(msg.encode())
-            except asyncio.TimeoutError:
-                await resp.write(b": ping\n\n")
-            except (ConnectionResetError, BrokenPipeError):
-                break
-    except Exception as e:
-        log.debug(f"SSE disconnect: {e}")
-    finally:
-        sse.disconnect(q)
-
-    return resp
-
-async def setup_api(app: web.Application) -> None:
-    cors = aiohttp_cors.setup(app, defaults={
-        "*": aiohttp_cors.ResourceOptions(
-            allow_credentials=True, expose_headers="*",
-            allow_headers="*", allow_methods="*"
-        )
-    })
-    
-    routes = [
-        ("/", "GET", api_health),
-        ("/api/health", "GET", api_health),
-        ("/api/me", "GET", api_me),
-        ("/api/team", "GET", api_team),
-        ("/api/availability", "GET", api_availability_grid),
-        ("/api/availability", "POST", api_set_availability),
-    ]
-    # SSE регистрируем отдельно (streaming response, не обычный handler)
-    app.router.add_get("/api/events", api_events)
-    
-    for path, method, handler in routes:
-        resource = app.router.add_resource(path)
-        cors.add(resource.add_route(method, handler))
-
-
-async def start_api_server() -> None:
-    app = web.Application()
-    await setup_api(app)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", API_PORT)
-    await site.start()
-    log.info(f"🌐 API server started on port {API_PORT}")
-
-
-# ============================================================================
-# 👁 AVAILABILITY WATCHER
-# ============================================================================
 
 async def availability_watcher() -> None:
+    """
+    Логика уведомлений:
+    • Уведомляем только СЕГОДНЯ или ЗАВТРА после 18:00 (за ~12 часов)
+    • 3 готовых  → ГАЗ ФАСЛО (один раз, cooldown 6ч)
+    • 4 готовых  → ПОЧТИ СОСТАВ (один раз)
+    • 5 готовых  → ВСЕ В СБОРЕ (один раз)
+    • 5 готовых, время не совпадает → особое (один раз)
+    """
     log.info("👁  Availability watcher started")
     while True:
         try:
@@ -717,126 +521,59 @@ async def availability_watcher() -> None:
                 await asyncio.sleep(AVAIL_CHECK_INTERVAL)
                 continue
 
-            grid = await db_get_availability_grid(AVAILABILITY_DAYS_AHEAD)
+            grid  = await db_get_availability_grid(AVAILABILITY_DAYS_AHEAD)
+            today = date.today()
+            now_h = datetime.now().hour
 
-            # Группируем по дате — теперь сохраняем time_text
             days: Dict[str, Dict] = {}
             for entry in grid:
                 d = entry["slot_date"]
                 if d not in days:
                     days[d] = {"date": d, "can": [], "cant": []}
-                if entry["status"] == "can" and entry["username"]:
+                if entry["status"] == "can" and entry.get("username"):
                     days[d]["can"].append({
                         "username":  entry["username"],
                         "time_text": entry.get("time_text", "anytime"),
                     })
-                elif entry["status"] == "cant" and entry["username"]:
+                elif entry["status"] == "cant" and entry.get("username"):
                     days[d]["cant"].append(entry["username"])
 
             for day in days.values():
-                count = len(day["can"])
+                day_date  = date.fromisoformat(day["date"])
+                count     = len(day["can"])
                 usernames = [p["username"] for p in day["can"]]
 
+                # Окно: только сегодня или завтра после 18:00
+                days_ahead = (day_date - today).days
+                if days_ahead < 0:
+                    continue
+                if days_ahead > 1:
+                    continue
+                if days_ahead == 1 and now_h < 18:
+                    continue
+
                 if count == TEAM_SIZE:
-                    # Проверяем пересечение времён
                     overlap_ok, mismatch_info = check_time_overlap(day["can"])
-
                     if overlap_ok:
-                        # Все совпадают по времени — обычное уведомление
-                        if not await db_was_notified(day["date"], 5):
+                        if not await _already_notified(day["date"], 5):
                             await notify_full_house(day["date"], usernames)
-                            await db_mark_notified(day["date"], 5)
+                            await _mark_notified(day["date"], 5)
                     else:
-                        # Все 5 готовы, но время не совпадает
-                        if not await db_was_notified(day["date"], 50):  # 50 = special code
+                        if not await _already_notified(day["date"], 50):
                             await notify_time_mismatch(day["date"], day["can"], mismatch_info)
-                            await db_mark_notified(day["date"], 50)
-
+                            await _mark_notified(day["date"], 50)
                 elif count == 4:
-                    if not await db_was_notified(day["date"], 4):
+                    if not await _already_notified(day["date"], 4):
                         await notify_partial_house(day["date"], usernames, 4)
-                        await db_mark_notified(day["date"], 4)
+                        await _mark_notified(day["date"], 4)
                 elif count == 3:
-                    if not await db_was_notified(day["date"], 3):
+                    if not await _already_notified(day["date"], 3):
                         await notify_partial_house(day["date"], usernames, 3)
-                        await db_mark_notified(day["date"], 3)
+                        await _mark_notified(day["date"], 3)
 
         except Exception as e:
-            log.error(f"availability_watcher: {e}")
+            log.error(f"availability_watcher error: {e}")
         await asyncio.sleep(AVAIL_CHECK_INTERVAL)
-
-
-def parse_time_range(time_text: str) -> Optional[tuple]:
-    """
-    Парсим time_text в (start_minutes, end_minutes).
-    Возвращает None если ANY TIME (anytime, ALL DAY, пусто).
-    """
-    if not time_text or time_text.lower() in ("anytime", "all day", ""):
-        return None  # готов в любое время — подходит под всё
-
-    presets = {
-        "MORNING": (600, 840),    # 10:00–14:00
-        "DAY":     (840, 1140),   # 14:00–19:00
-        "NIGHT":   (1140, 1380),  # 19:00–23:00
-    }
-    if time_text.upper() in presets:
-        return presets[time_text.upper()]
-
-    # "18:00-22:00" или "18:00"
-    try:
-        if "-" in time_text:
-            parts = time_text.split("-")
-            s = parts[0].strip()
-            e = parts[1].strip()
-            sh, sm = map(int, s.split(":"))
-            eh, em = map(int, e.split(":"))
-            return (sh * 60 + sm, eh * 60 + em)
-        elif ":" in time_text:
-            h, m = map(int, time_text.strip().split(":"))
-            return (h * 60 + m, h * 60 + m + 120)  # +2 часа по умолчанию
-    except Exception:
-        pass
-
-    return None  # не смогли распарсить — считаем любым временем
-
-
-def check_time_overlap(players: List[Dict]) -> tuple:
-    """
-    Проверяем есть ли общее окно времени у всех игроков.
-    Возвращает (overlap_ok: bool, mismatch_info: dict)
-    """
-    ranges = []
-    any_time_players = []
-    ranged_players = []
-
-    for p in players:
-        r = parse_time_range(p.get("time_text", "anytime"))
-        if r is None:
-            any_time_players.append(p["username"])
-        else:
-            ranged_players.append({"username": p["username"], "range": r, "text": p["time_text"]})
-            ranges.append(r)
-
-    # Если все ANY TIME — отличное совпадение
-    if not ranges:
-        return True, {}
-
-    # Находим пересечение всех диапазонов
-    overlap_start = max(r[0] for r in ranges)
-    overlap_end   = min(r[1] for r in ranges)
-
-    if overlap_start < overlap_end:
-        # Есть пересечение
-        def fmt(m): return f"{m//60:02d}:{m%60:02d}"
-        return True, {"start": fmt(overlap_start), "end": fmt(overlap_end)}
-
-    # Нет пересечения — собираем детали
-    mismatch = {
-        "any_time":  any_time_players,
-        "ranged":    ranged_players,
-    }
-    return False, mismatch
-
 
 async def notify_time_mismatch(slot_date: str, players: List[Dict], mismatch: Dict) -> None:
     """Уведомление: все 5 готовы, но время не совпадает."""
@@ -1214,6 +951,7 @@ async def cmd_help(message: Message) -> None:
         "📅 <b>Календарь</b>\n"
         "/calendar — открыть календарь сборов\n"
         "/calendarpost — закрепить кнопку в ПРАКАХ\n"
+        "/stratpost — закрепить кнопки разделов в STRATBOOK\n"
         "/upcoming — ближайшие праки из Google Calendar\n\n"
 
         "📣 <b>Группа</b>\n"
@@ -1565,6 +1303,37 @@ async def cmd_calendar(message: Message) -> None:
         log.error(f"cmd_calendar error: {e}")
         await message.reply(f"Открой в личке: https://t.me/{BOT_USERNAME}")
 
+
+
+@dp.message_handler(commands=["stratpost"])
+async def cmd_stratpost(message: Message) -> None:
+    """Закрепить кнопки Stratbook и Nades в топик STRATBOOK."""
+    if not is_admin_private(message):
+        return
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("📋 Stratbook", callback_data="section:strat"),
+        InlineKeyboardButton("💣 Nades",     callback_data="section:nades"),
+    )
+    # STRATBOOK_TOPIC_ID — нужно добавить константу
+    stratbook_topic = int(os.getenv("STRATBOOK_TOPIC_ID", "1542"))
+    try:
+        sent = await bot.send_message(
+            GROUP_ID,
+            "📚 <b>Разделы команды</b>\n\n"
+            "Выбери раздел для изучения стратегий и гранат:",
+            parse_mode="HTML",
+            message_thread_id=stratbook_topic,
+            reply_markup=kb
+        )
+        try:
+            await bot.pin_chat_message(GROUP_ID, sent.message_id, disable_notification=True)
+        except Exception:
+            pass
+        await message.reply(f"✅ Закреплено в STRATBOOK (topic {stratbook_topic})")
+    except Exception as e:
+        log.error(f"cmd_stratpost: {e}")
+        await message.reply(f"❌ Ошибка: {e}")
 
 @dp.message_handler(commands=["calendarpost"])
 async def cmd_calendarpost(message: Message) -> None:
