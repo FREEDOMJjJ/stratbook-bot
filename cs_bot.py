@@ -897,6 +897,194 @@ def back_menu(back_to):
 
 
 
+# ============================================================================
+# 🌐 API SERVER — aiohttp web server for Mini App
+# ============================================================================
+
+async def verify_telegram_data(init_data: str) -> Optional[Dict]:
+    """Verify Telegram WebApp init data and return user info."""
+    try:
+        params = dict(parse_qsl(init_data, keep_blank_values=True))
+        hash_val = params.pop("hash", "")
+        data_check = "\n".join(f"{k}={v}" for k, v in sorted(params.items()))
+        secret = hmac.new("WebAppData".encode(), BOT_TOKEN.encode(), hashlib.sha256).digest()
+        expected = hmac.new(secret, data_check.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, hash_val):
+            return None
+        user_str = params.get("user", "{}")
+        return json.loads(user_str)
+    except Exception:
+        return None
+
+
+async def get_api_user(request: Request) -> Optional[Dict]:
+    """Extract and verify user from request headers or query params."""
+    init_data = request.headers.get("X-Telegram-Init-Data", "")
+    if not init_data:
+        init_data = request.rel_url.query.get("tg", "")
+    if not init_data:
+        return None
+    user = await verify_telegram_data(init_data)
+    if not user:
+        return None
+    team = await db_get_team()
+    team_ids = [p["user_id"] for p in team]
+    if user.get("id") not in team_ids and user.get("id") != ADMIN_ID:
+        return None
+    return user
+
+
+async def api_health(request: Request) -> Response:
+    return json_response({"ok": True, "service": "egoist-bot"})
+
+
+async def api_me(request: Request) -> Response:
+    user = await get_api_user(request)
+    if not user:
+        return json_response({"error": "Unauthorized"}, status=401)
+    return json_response({"id": user.get("id"), "username": user.get("username", ""),
+                          "first_name": user.get("first_name", "")})
+
+
+async def api_team(request: Request) -> Response:
+    user = await get_api_user(request)
+    if not user:
+        return json_response({"error": "Unauthorized"}, status=401)
+    team = await db_get_team()
+    return json_response({"team": team})
+
+
+async def api_availability_grid(request: Request) -> Response:
+    user = await get_api_user(request)
+    if not user:
+        return json_response({"error": "Unauthorized"}, status=401)
+    grid = await db_get_availability_grid(AVAILABILITY_DAYS_AHEAD)
+    aggregated = {}
+    for entry in grid:
+        key = entry["slot_date"]
+        if key not in aggregated:
+            aggregated[key] = {"slot_date": entry["slot_date"], "can": [], "cant": []}
+        player = {"user_id": entry["user_id"], "username": entry["username"],
+                  "display_name": entry["display_name"], "time_text": entry["time_text"]}
+        if entry["status"] == "can":
+            aggregated[key]["can"].append(player)
+        else:
+            aggregated[key]["cant"].append(player)
+    return json_response({"slots": list(aggregated.values()), "team_size": TEAM_SIZE,
+                          "days_ahead": AVAILABILITY_DAYS_AHEAD, "your_id": user.get("id")})
+
+
+async def api_set_availability(request: Request) -> Response:
+    user = await get_api_user(request)
+    if not user:
+        return json_response({"error": "Unauthorized"}, status=401)
+    try:
+        body = await request.json()
+        slot_date = body["slot_date"]
+        time_text = body.get("time_text", "anytime")
+        status = body["status"]
+        if status not in ("can", "cant", "clear"):
+            return json_response({"error": "Invalid status"}, status=400)
+        success = await db_set_availability(user["id"], slot_date, time_text, status)
+        if not success:
+            return json_response({"error": "DB error"}, status=500)
+        asyncio.create_task(sse.broadcast("availability_update", f'{{"date":"{slot_date}"}}'))
+        return json_response({"ok": True})
+    except Exception as e:
+        log.error(f"api_set_availability error: {e}")
+        return json_response({"error": str(e)}, status=500)
+
+
+class SSEManager:
+    def __init__(self):
+        self._clients: set = set()
+
+    def connect(self):
+        q = asyncio.Queue()
+        self._clients.add(q)
+        return q
+
+    def disconnect(self, q):
+        self._clients.discard(q)
+
+    async def broadcast(self, event: str, data: str = "{}") -> None:
+        if not self._clients:
+            return
+        message = f"event: {event}\ndata: {data}\n\n"
+        dead = set()
+        for q in self._clients:
+            try:
+                q.put_nowait(message)
+            except asyncio.QueueFull:
+                dead.add(q)
+        for q in dead:
+            self._clients.discard(q)
+
+
+sse = SSEManager()
+
+
+async def api_events(request: Request) -> web.StreamResponse:
+    tg_data = request.rel_url.query.get("tg", "")
+    if tg_data:
+        user = await verify_telegram_data(tg_data)
+        if not user:
+            return web.Response(status=401, text="Unauthorized")
+    resp = web.StreamResponse(headers={
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    })
+    await resp.prepare(request)
+    q = sse.connect()
+    try:
+        await resp.write(b"event: connected\ndata: {}\n\n")
+        while True:
+            try:
+                msg = await asyncio.wait_for(q.get(), timeout=25)
+                await resp.write(msg.encode())
+            except asyncio.TimeoutError:
+                await resp.write(b": ping\n\n")
+            except (ConnectionResetError, BrokenPipeError):
+                break
+    except Exception as e:
+        log.debug(f"SSE disconnect: {e}")
+    finally:
+        sse.disconnect(q)
+    return resp
+
+
+async def setup_api(app: web.Application) -> None:
+    cors = aiohttp_cors.setup(app, defaults={
+        "*": aiohttp_cors.ResourceOptions(
+            allow_credentials=True, expose_headers="*", allow_headers="*", allow_methods="*"
+        )
+    })
+    routes = [
+        ("/", "GET", api_health),
+        ("/api/health", "GET", api_health),
+        ("/api/me", "GET", api_me),
+        ("/api/team", "GET", api_team),
+        ("/api/availability", "GET", api_availability_grid),
+        ("/api/availability", "POST", api_set_availability),
+    ]
+    for path, method, handler in routes:
+        resource = cors.add(app.router.add_resource(path))
+        cors.add(resource.add_route(method, handler))
+    app.router.add_get("/api/events", api_events)
+
+
+async def _start_api() -> None:
+    app = web.Application()
+    await setup_api(app)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", API_PORT)
+    await site.start()
+    log.info(f"🌐 API server started on port {API_PORT}")
+
+
 async def on_startup(dp: Dispatcher) -> None:
     log.info("=" * 50)
     log.info("🤖 EGOIST BOT STARTING")
@@ -912,7 +1100,7 @@ async def on_startup(dp: Dispatcher) -> None:
     asyncio.create_task(calendar_loop())
     asyncio.create_task(quote_loop())
     asyncio.create_task(availability_watcher())
-    asyncio.create_task(start_api_server())
+    asyncio.create_task(_start_api())
     try:
         await bot.edit_message_text(
             MAIN_MENU_TEXT, chat_id=GROUP_ID, message_id=PINNED_MESSAGE_ID,
