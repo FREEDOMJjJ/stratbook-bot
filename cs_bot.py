@@ -716,36 +716,167 @@ async def availability_watcher() -> None:
             if not db_pool:
                 await asyncio.sleep(AVAIL_CHECK_INTERVAL)
                 continue
-            
+
             grid = await db_get_availability_grid(AVAILABILITY_DAYS_AHEAD)
-            # Группируем по дате
+
+            # Группируем по дате — теперь сохраняем time_text
             days: Dict[str, Dict] = {}
             for entry in grid:
                 d = entry["slot_date"]
                 if d not in days:
                     days[d] = {"date": d, "can": [], "cant": []}
                 if entry["status"] == "can" and entry["username"]:
-                    days[d]["can"].append(entry["username"])
+                    days[d]["can"].append({
+                        "username":  entry["username"],
+                        "time_text": entry.get("time_text", "anytime"),
+                    })
                 elif entry["status"] == "cant" and entry["username"]:
                     days[d]["cant"].append(entry["username"])
-            
+
             for day in days.values():
                 count = len(day["can"])
-                if count == 5:
-                    if not await db_was_notified(day["date"], 5):
-                        await notify_full_house(day["date"], day["can"])
-                        await db_mark_notified(day["date"], 5)
+                usernames = [p["username"] for p in day["can"]]
+
+                if count == TEAM_SIZE:
+                    # Проверяем пересечение времён
+                    overlap_ok, mismatch_info = check_time_overlap(day["can"])
+
+                    if overlap_ok:
+                        # Все совпадают по времени — обычное уведомление
+                        if not await db_was_notified(day["date"], 5):
+                            await notify_full_house(day["date"], usernames)
+                            await db_mark_notified(day["date"], 5)
+                    else:
+                        # Все 5 готовы, но время не совпадает
+                        if not await db_was_notified(day["date"], 50):  # 50 = special code
+                            await notify_time_mismatch(day["date"], day["can"], mismatch_info)
+                            await db_mark_notified(day["date"], 50)
+
                 elif count == 4:
                     if not await db_was_notified(day["date"], 4):
-                        await notify_partial_house(day["date"], day["can"], 4)
+                        await notify_partial_house(day["date"], usernames, 4)
                         await db_mark_notified(day["date"], 4)
                 elif count == 3:
                     if not await db_was_notified(day["date"], 3):
-                        await notify_partial_house(day["date"], day["can"], 3)
+                        await notify_partial_house(day["date"], usernames, 3)
                         await db_mark_notified(day["date"], 3)
+
         except Exception as e:
             log.error(f"availability_watcher: {e}")
         await asyncio.sleep(AVAIL_CHECK_INTERVAL)
+
+
+def parse_time_range(time_text: str) -> Optional[tuple]:
+    """
+    Парсим time_text в (start_minutes, end_minutes).
+    Возвращает None если ANY TIME (anytime, ALL DAY, пусто).
+    """
+    if not time_text or time_text.lower() in ("anytime", "all day", ""):
+        return None  # готов в любое время — подходит под всё
+
+    presets = {
+        "MORNING": (600, 840),    # 10:00–14:00
+        "DAY":     (840, 1140),   # 14:00–19:00
+        "NIGHT":   (1140, 1380),  # 19:00–23:00
+    }
+    if time_text.upper() in presets:
+        return presets[time_text.upper()]
+
+    # "18:00-22:00" или "18:00"
+    try:
+        if "-" in time_text:
+            parts = time_text.split("-")
+            s = parts[0].strip()
+            e = parts[1].strip()
+            sh, sm = map(int, s.split(":"))
+            eh, em = map(int, e.split(":"))
+            return (sh * 60 + sm, eh * 60 + em)
+        elif ":" in time_text:
+            h, m = map(int, time_text.strip().split(":"))
+            return (h * 60 + m, h * 60 + m + 120)  # +2 часа по умолчанию
+    except Exception:
+        pass
+
+    return None  # не смогли распарсить — считаем любым временем
+
+
+def check_time_overlap(players: List[Dict]) -> tuple:
+    """
+    Проверяем есть ли общее окно времени у всех игроков.
+    Возвращает (overlap_ok: bool, mismatch_info: dict)
+    """
+    ranges = []
+    any_time_players = []
+    ranged_players = []
+
+    for p in players:
+        r = parse_time_range(p.get("time_text", "anytime"))
+        if r is None:
+            any_time_players.append(p["username"])
+        else:
+            ranged_players.append({"username": p["username"], "range": r, "text": p["time_text"]})
+            ranges.append(r)
+
+    # Если все ANY TIME — отличное совпадение
+    if not ranges:
+        return True, {}
+
+    # Находим пересечение всех диапазонов
+    overlap_start = max(r[0] for r in ranges)
+    overlap_end   = min(r[1] for r in ranges)
+
+    if overlap_start < overlap_end:
+        # Есть пересечение
+        def fmt(m): return f"{m//60:02d}:{m%60:02d}"
+        return True, {"start": fmt(overlap_start), "end": fmt(overlap_end)}
+
+    # Нет пересечения — собираем детали
+    mismatch = {
+        "any_time":  any_time_players,
+        "ranged":    ranged_players,
+    }
+    return False, mismatch
+
+
+async def notify_time_mismatch(slot_date: str, players: List[Dict], mismatch: Dict) -> None:
+    """Уведомление: все 5 готовы, но время не совпадает."""
+    try:
+        date_obj = date.fromisoformat(slot_date)
+        weekdays = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+        weekday  = weekdays[date_obj.weekday()]
+        date_str = date_obj.strftime("%d.%m.%Y")
+
+        tags = " ".join(f"@{p['username']}" for p in players if p.get("username"))
+
+        # Строим список кто в какое время
+        time_lines = []
+        for p in players:
+            t = p.get("time_text", "anytime")
+            label = {
+                "anytime": "🌅 Весь день",
+                "ALL DAY": "🌅 Весь день",
+                "MORNING": "🌅 Утро (10-14)",
+                "DAY":     "☀️ День (14-19)",
+                "NIGHT":   "🌙 Ночь (19-23)",
+            }.get(t, f"🕐 {t}")
+            time_lines.append(f"  • @{p['username']}: {label}")
+
+        times_text = "\n".join(time_lines)
+
+        await bot.send_message(
+            GROUP_ID,
+            f"👥 <b>ВСЕ 5 ГОТОВЫ!</b> Но время не совпадает 👉👈\n\n"
+            f"📅 {weekday}, {date_str}\n\n"
+            f"<b>Кто когда может:</b>\n{times_text}\n\n"
+            f"{tags}\n\n"
+            f"💬 Ребят, попробуйте договориться о времени — "
+            f"состав полный, осталось согласовать когда!",
+            parse_mode="HTML",
+            message_thread_id=SCRIMS_TOPIC_ID
+        )
+        log.info(f"⏰ Time mismatch notification for {slot_date}")
+    except Exception as e:
+        log.error(f"notify_time_mismatch: {e}")
 
 
 
@@ -989,7 +1120,6 @@ def main_menu() -> InlineKeyboardMarkup:
         InlineKeyboardButton("📋 Stratbook", callback_data="section:strat"),
         InlineKeyboardButton("💣 Nades", callback_data="section:nades"),
     )
-    kb.add(InlineKeyboardButton("📅 Календарь", url=WEBAPP_URL))
     return kb
 
 
@@ -1000,7 +1130,6 @@ def main_menu_webapp() -> InlineKeyboardMarkup:
         InlineKeyboardButton("📋 Stratbook", callback_data="section:strat"),
         InlineKeyboardButton("💣 Nades", callback_data="section:nades"),
     )
-    kb.add(InlineKeyboardButton("📅 Календарь", web_app=WebAppInfo(url=WEBAPP_URL)))
     return kb
 
 
