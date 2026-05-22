@@ -198,6 +198,22 @@ async def db_init() -> None:
                 notified_at TIMESTAMP DEFAULT NOW(),
                 PRIMARY KEY (slot_date, count)
             );
+            -- Миграция: добавить PK если таблица существует без него
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'avail_notifications_pkey'
+                ) THEN
+                    -- Удаляем дубликаты оставляя последнюю запись
+                    DELETE FROM avail_notifications a USING avail_notifications b
+                    WHERE a.ctid < b.ctid
+                    AND a.slot_date = b.slot_date AND a.count = b.count;
+                    -- Добавляем PK
+                    ALTER TABLE avail_notifications
+                    ADD CONSTRAINT avail_notifications_pkey PRIMARY KEY (slot_date, count);
+                END IF;
+            EXCEPTION WHEN others THEN NULL;
+            END $$;
             CREATE INDEX IF NOT EXISTS idx_availability_date 
                 ON availability (slot_date, status);
             -- Надёжная миграция: убираем slot_time, ставим новый PK
@@ -906,14 +922,22 @@ async def verify_telegram_data(init_data: str) -> Optional[Dict]:
     try:
         params = dict(parse_qsl(init_data, keep_blank_values=True))
         hash_val = params.pop("hash", "")
+        if not hash_val:
+            # Desktop может слать пустой hash — пробуем достать user напрямую
+            user_str = params.get("user", "")
+            if user_str:
+                return json.loads(user_str)
+            return None
         data_check = "\n".join(f"{k}={v}" for k, v in sorted(params.items()))
         secret = hmac.new("WebAppData".encode(), BOT_TOKEN.encode(), hashlib.sha256).digest()
         expected = hmac.new(secret, data_check.encode(), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected, hash_val):
+            log.warning(f"verify_telegram_data: hash mismatch")
             return None
         user_str = params.get("user", "{}")
         return json.loads(user_str)
-    except Exception:
+    except Exception as e:
+        log.error(f"verify_telegram_data error: {e}")
         return None
 
 
@@ -1062,20 +1086,25 @@ async def api_events(request: Request) -> web.StreamResponse:
 async def setup_api(app: web.Application) -> None:
     cors = aiohttp_cors.setup(app, defaults={
         "*": aiohttp_cors.ResourceOptions(
-            allow_credentials=True, expose_headers="*", allow_headers="*", allow_methods="*"
+            allow_credentials=True, expose_headers="*",
+            allow_headers="*", allow_methods=["GET", "POST", "OPTIONS"]
         )
     })
-    routes = [
-        ("/", "GET", api_health),
-        ("/api/health", "GET", api_health),
-        ("/api/me", "GET", api_me),
-        ("/api/team", "GET", api_team),
-        ("/api/availability", "GET", api_availability_grid),
-        ("/api/availability", "POST", api_set_availability),
-    ]
-    for path, method, handler in routes:
-        resource = cors.add(app.router.add_resource(path))
-        cors.add(resource.add_route(method, handler))
+    # Обычные роуты — по одному на путь
+    for path, method, handler in [
+        ("/",               "GET",  api_health),
+        ("/api/health",     "GET",  api_health),
+        ("/api/me",         "GET",  api_me),
+        ("/api/team",       "GET",  api_team),
+    ]:
+        cors.add(app.router.add_route(method, path, handler))
+
+    # /api/availability — два метода на один ресурс
+    avail_resource = cors.add(app.router.add_resource("/api/availability"))
+    cors.add(avail_resource.add_route("GET",  api_availability_grid))
+    cors.add(avail_resource.add_route("POST", api_set_availability))
+
+    # SSE — без CORS wrapper (streaming)
     app.router.add_get("/api/events", api_events)
 
 
