@@ -470,7 +470,7 @@ async def db_get_availability_grid(days_ahead: int = 14) -> List[Dict[str, Any]]
 # Ключ: "slot_date:count", значение: timestamp
 # In-memory кэш уведомлений — ключ: "date:count", значение: timestamp
 _notif_cache: Dict[str, float] = {}
-_NOTIF_COOLDOWN_H = 6  # часов до повторного уведомления
+_NOTIF_COOLDOWN_H = 24  # не повторять уведомление раньше чем через 24 часа
 
 
 async def _already_notified(slot_date: str, count: int) -> bool:
@@ -500,15 +500,20 @@ async def _already_notified(slot_date: str, count: int) -> bool:
 
 
 async def _mark_notified(slot_date: str, count: int) -> None:
-    """Записать уведомление. INSERT ONLY — не обновляем существующее."""
+    """Записать уведомление. Работает даже без PRIMARY KEY на таблице."""
     _notif_cache[f"{slot_date}:{count}"] = datetime.now().timestamp()
     try:
         async with db_pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO avail_notifications (slot_date, count, notified_at) "
-                "VALUES ($1, $2, NOW()) ON CONFLICT (slot_date, count) DO NOTHING",
+            # Сначала проверяем есть ли уже запись
+            existing = await conn.fetchrow(
+                "SELECT 1 FROM avail_notifications WHERE slot_date=$1 AND count=$2",
                 date.fromisoformat(slot_date), count
             )
+            if not existing:
+                await conn.execute(
+                    "INSERT INTO avail_notifications (slot_date, count, notified_at) VALUES ($1, $2, NOW())",
+                    date.fromisoformat(slot_date), count
+                )
     except Exception as e:
         log.error(f"_mark_notified error: {e}")
 
@@ -572,20 +577,20 @@ async def availability_watcher() -> None:
                     overlap_ok, mismatch_info = check_time_overlap(day["can"])
                     if overlap_ok:
                         if not await _already_notified(day["date"], 5):
+                            await _mark_notified(day["date"], 5)   # сначала флаг
                             await notify_full_house(day["date"], usernames)
-                            await _mark_notified(day["date"], 5)
                     else:
                         if not await _already_notified(day["date"], 50):
-                            await notify_time_mismatch(day["date"], day["can"], mismatch_info)
                             await _mark_notified(day["date"], 50)
+                            await notify_time_mismatch(day["date"], day["can"], mismatch_info)
                 elif count == 4:
                     if not await _already_notified(day["date"], 4):
-                        await notify_partial_house(day["date"], usernames, 4)
                         await _mark_notified(day["date"], 4)
+                        await notify_partial_house(day["date"], usernames, 4)
                 elif count == 3:
                     if not await _already_notified(day["date"], 3):
-                        await notify_partial_house(day["date"], usernames, 3)
                         await _mark_notified(day["date"], 3)
+                        await notify_partial_house(day["date"], usernames, 3)
 
         except Exception as e:
             log.error(f"availability_watcher error: {e}")
@@ -690,6 +695,8 @@ async def notify_full_house(slot_date: str, usernames: List[str]) -> None:
 # ============================================================================
 
 def calendar_service():
+    if not GOOGLE_CREDS_JSON:
+        return None  # тихо возвращаем None если нет credentials
     try:
         creds_info = json.loads(GOOGLE_CREDS_JSON)
         creds = service_account.Credentials.from_service_account_info(
@@ -942,22 +949,23 @@ async def verify_telegram_data(init_data: str) -> Optional[Dict]:
 
 
 async def get_api_user(request: Request) -> Optional[Dict]:
-    """Extract and verify user from request headers or query params."""
     init_data = request.headers.get("X-Telegram-Init-Data", "")
     if not init_data:
         init_data = request.rel_url.query.get("tg", "")
     if not init_data:
+        log.warning("get_api_user: no init_data in request")
         return None
     user = await verify_telegram_data(init_data)
     if not user:
+        log.warning("get_api_user: verify_telegram_data returned None")
         return None
-    # Приводим к int для надёжного сравнения
     user_id = int(user.get("id", 0))
     if user_id == ADMIN_ID:
         return user
     team = await db_get_team()
     team_ids = [int(p["user_id"]) for p in team]
     if user_id not in team_ids:
+        log.warning(f"get_api_user: user {user_id} not in team {team_ids}")
         return None
     return user
 
@@ -1086,25 +1094,28 @@ async def api_events(request: Request) -> web.StreamResponse:
 async def setup_api(app: web.Application) -> None:
     cors = aiohttp_cors.setup(app, defaults={
         "*": aiohttp_cors.ResourceOptions(
-            allow_credentials=True, expose_headers="*",
-            allow_headers="*", allow_methods=["GET", "POST", "OPTIONS"]
+            allow_credentials=True,
+            expose_headers="*",
+            allow_headers="*",
+            allow_methods=["GET", "POST", "OPTIONS"],
         )
     })
-    # Обычные роуты — по одному на путь
-    for path, method, handler in [
-        ("/",               "GET",  api_health),
-        ("/api/health",     "GET",  api_health),
-        ("/api/me",         "GET",  api_me),
-        ("/api/team",       "GET",  api_team),
-    ]:
-        cors.add(app.router.add_route(method, path, handler))
 
-    # /api/availability — два метода на один ресурс
-    avail_resource = cors.add(app.router.add_resource("/api/availability"))
-    cors.add(avail_resource.add_route("GET",  api_availability_grid))
-    cors.add(avail_resource.add_route("POST", api_set_availability))
+    # Все роуты через add_resource — единообразно
+    routes = [
+        ("/",                    [("GET",  api_health)]),
+        ("/api/health",          [("GET",  api_health)]),
+        ("/api/me",              [("GET",  api_me)]),
+        ("/api/team",            [("GET",  api_team)]),
+        ("/api/availability",    [("GET",  api_availability_grid),
+                                  ("POST", api_set_availability)]),
+    ]
+    for path, methods in routes:
+        resource = cors.add(app.router.add_resource(path))
+        for method, handler in methods:
+            cors.add(resource.add_route(method, handler))
 
-    # SSE — без CORS wrapper (streaming)
+    # SSE отдельно — streaming, CORS не нужен
     app.router.add_get("/api/events", api_events)
 
 
