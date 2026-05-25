@@ -198,17 +198,25 @@ async def db_init() -> None:
                 notified_at TIMESTAMP DEFAULT NOW(),
                 PRIMARY KEY (slot_date, count)
             );
-            -- Миграция: добавить PK если таблица существует без него
+            -- Миграция avail_notifications:
+            -- 1. Удалить старую колонку slot_time если есть
+            -- 2. Добавить PK если нет
             DO $$ BEGIN
+                -- Убираем slot_time (старая схема)
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name='avail_notifications' AND column_name='slot_time'
+                ) THEN
+                    ALTER TABLE avail_notifications DROP COLUMN slot_time;
+                END IF;
+                -- Добавляем PK если нет
                 IF NOT EXISTS (
                     SELECT 1 FROM pg_constraint
                     WHERE conname = 'avail_notifications_pkey'
                 ) THEN
-                    -- Удаляем дубликаты оставляя последнюю запись
                     DELETE FROM avail_notifications a USING avail_notifications b
                     WHERE a.ctid < b.ctid
                     AND a.slot_date = b.slot_date AND a.count = b.count;
-                    -- Добавляем PK
                     ALTER TABLE avail_notifications
                     ADD CONSTRAINT avail_notifications_pkey PRIMARY KEY (slot_date, count);
                 END IF;
