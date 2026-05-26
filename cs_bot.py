@@ -1149,6 +1149,171 @@ async def setup_api(app: web.Application) -> None:
     app.router.add_get("/api/events", api_events)
 
 
+
+# Трекер состояния для детекции "игрок вышел из состава"
+# Ключ: slot_date, значение: {user_id: last_known_status}
+_prev_status: Dict[str, Dict[int, str]] = {}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 📢 Уведомление "игрок вышел из состава"
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _notify_player_left(slot_date: str, username: str) -> None:
+    """Бот пишет что игрок снял готовность."""
+    try:
+        day_date = date.fromisoformat(slot_date)
+        today    = date.today()
+        # Пишем только если это сегодня или завтра
+        if (day_date - today).days not in (0, 1):
+            return
+        weekdays = ["Понедельник","Вторник","Среда","Четверг","Пятница","Суббота","Воскресенье"]
+        wd = weekdays[day_date.weekday()]
+        text = (
+            f"😔 <b>@{username} вышел из состава</b>\n\n"
+            f"📅 {wd}, {day_date.strftime('%d.%m.%Y')}\n\n"
+            f"{PLAYERS_TAG}\n"
+            f"Состав неполный — кто заменит?"
+        )
+        await bot.send_message(
+            GROUP_ID, text,
+            parse_mode="HTML",
+            message_thread_id=SCRIMS_TOPIC_ID
+        )
+    except Exception as e:
+        log.error(f"_notify_player_left: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ⏰ Напоминалка в 20:00 МСК — кто не отметился на завтра
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def reminder_watcher() -> None:
+    """Каждый день в 20:00 МСК — напоминаем кто не отметился на завтра."""
+    log.info("⏰ Reminder watcher started")
+    while True:
+        try:
+            now_msk  = datetime.now(MOSCOW_TZ)
+            tomorrow = date.today() + timedelta(days=1)
+
+            # Стреляем только в окно 20:00–20:02 МСК
+            if now_msk.hour == 20 and now_msk.minute < 2:
+                notif_key = f"reminder:{tomorrow.isoformat()}"
+                if not await _already_notified(tomorrow.isoformat(), 99):
+                    grid = await db_get_availability_grid(2)
+                    marked_ids: set = set()
+                    for entry in grid:
+                        if entry["slot_date"] == tomorrow.isoformat():
+                            marked_ids.add(int(entry["user_id"]))
+
+                    team   = await db_get_team()
+                    # Кто не отметился вообще (ни can ни cant)
+                    unmarked = [
+                        p for p in team
+                        if int(p["user_id"]) not in marked_ids
+                        and p.get("username")
+                    ]
+
+                    if len(unmarked) > 0 and len(marked_ids) < TEAM_SIZE:
+                        tags = " ".join(f"@{p['username']}" for p in unmarked)
+                        weekdays = ["Понедельник","Вторник","Среда","Четверг","Пятница","Суббота","Воскресенье"]
+                        wd = weekdays[tomorrow.weekday()]
+                        text = (
+                            f"⏰ <b>Напоминание!</b>\n\n"
+                            f"Завтра {wd} {tomorrow.strftime('%d.%m')} — "
+                            f"отметьте готовность в календаре!\n\n"
+                            f"Ещё не отметились: {tags}\n\n"
+                            f"👉 Открой бота и нажми кнопку Календарь"
+                        )
+                        await bot.send_message(
+                            GROUP_ID, text,
+                            parse_mode="HTML",
+                            message_thread_id=SCRIMS_TOPIC_ID
+                        )
+                        await _mark_notified(tomorrow.isoformat(), 99)
+                        log.info(f"⏰ Reminder sent for {tomorrow}")
+        except Exception as e:
+            log.error(f"reminder_watcher: {e}")
+        # Проверяем каждые 60 сек — точно попадём в окно
+        await asyncio.sleep(60)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🏆 Серия сборов — API endpoint
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def db_get_streak() -> Dict:
+    """Считаем серию дней подряд с полным составом."""
+    try:
+        async with db_pool.acquire() as conn:
+            # Все дни где было >= 5 готовых, за последние 60 дней
+            rows = await conn.fetch("""
+                SELECT slot_date, COUNT(*) as cnt
+                FROM availability
+                WHERE status = 'can'
+                  AND slot_date < CURRENT_DATE
+                  AND slot_date >= CURRENT_DATE - INTERVAL '60 days'
+                GROUP BY slot_date
+                HAVING COUNT(*) >= $1
+                ORDER BY slot_date DESC
+            """, TEAM_SIZE)
+
+            if not rows:
+                return {"current": 0, "best": 0, "last_date": None}
+
+            full_days = sorted([r["slot_date"] for r in rows], reverse=True)
+            # Текущая серия — дни подряд до сегодня
+            current = 0
+            check   = date.today() - timedelta(days=1)
+            for d in full_days:
+                if d == check:
+                    current += 1
+                    check = check - timedelta(days=1)
+                else:
+                    break
+
+            # Лучшая серия за всё время
+            best    = 0
+            streak  = 1
+            for i in range(1, len(full_days)):
+                if (full_days[i-1] - full_days[i]).days == 1:
+                    streak += 1
+                    best = max(best, streak)
+                else:
+                    streak = 1
+            best = max(best, current, streak)
+
+            last = full_days[0].isoformat() if full_days else None
+            return {"current": current, "best": best, "last_date": last}
+    except Exception as e:
+        log.error(f"db_get_streak: {e}")
+        return {"current": 0, "best": 0, "last_date": None}
+
+
+async def api_streak(request: Request) -> Response:
+    user = await get_api_user(request)
+    if not user:
+        return json_response({"error": "Unauthorized"}, status=401)
+    data = await db_get_streak()
+    return json_response(data)
+
+
+CS2_MAPS = [
+    {"id": "mirage",  "name": "Mirage",  "emoji": "🏙️"},
+    {"id": "inferno", "name": "Inferno", "emoji": "🔥"},
+    {"id": "nuke",    "name": "Nuke",    "emoji": "☢️"},
+    {"id": "dust2",   "name": "Dust 2",  "emoji": "🏜️"},
+    {"id": "ancient", "name": "Ancient", "emoji": "🏛️"},
+]
+
+async def api_random_map(request: Request) -> Response:
+    user = await get_api_user(request)
+    if not user:
+        return json_response({"error": "Unauthorized"}, status=401)
+    import random as _rnd
+    m = _rnd.choice(CS2_MAPS)
+    return json_response({"map": m})
+
 async def _start_api() -> None:
     app = web.Application()
     await setup_api(app)
@@ -1157,6 +1322,36 @@ async def _start_api() -> None:
     site = web.TCPSite(runner, "0.0.0.0", API_PORT)
     await site.start()
     log.info(f"🌐 API server started on port {API_PORT}")
+
+@dp.message_handler(commands=["randommap", "rmap"])
+async def cmd_randommap(message: Message) -> None:
+    """Случайная карта из активного пула CS2."""
+    import random as _rnd
+    m = _rnd.choice(CS2_MAPS)
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("🔄 Другая карта", callback_data="randommap:again"))
+    await message.reply(
+        f"{m['emoji']} <b>Карта на прак: {m['name']}</b>\n\n"
+        f"Активный пул: " + " · ".join(x['name'] for x in CS2_MAPS),
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+
+
+@dp.callback_query_handler(lambda c: c.data == "randommap:again")
+async def cb_randommap(call: CallbackQuery) -> None:
+    import random as _rnd
+    m = _rnd.choice(CS2_MAPS)
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("🔄 Другая карта", callback_data="randommap:again"))
+    await call.message.edit_text(
+        f"{m['emoji']} <b>Карта на прак: {m['name']}</b>\n\n"
+        f"Активный пул: " + " · ".join(x['name'] for x in CS2_MAPS),
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+    await call.answer()
+
 
 
 async def on_startup(dp: Dispatcher) -> None:
@@ -1174,6 +1369,7 @@ async def on_startup(dp: Dispatcher) -> None:
     asyncio.create_task(calendar_loop())
     asyncio.create_task(quote_loop())
     asyncio.create_task(availability_watcher())
+    asyncio.create_task(reminder_watcher())
     asyncio.create_task(_start_api())
     try:
         await bot.edit_message_text(
