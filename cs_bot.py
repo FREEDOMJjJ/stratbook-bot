@@ -960,22 +960,44 @@ async def get_api_user(request: Request) -> Optional[Dict]:
     init_data = request.headers.get("X-Telegram-Init-Data", "")
     if not init_data:
         init_data = request.rel_url.query.get("tg", "")
-    if not init_data:
-        log.warning("get_api_user: no init_data in request")
-        return None
-    user = await verify_telegram_data(init_data)
-    if not user:
-        log.warning("get_api_user: verify_telegram_data returned None")
-        return None
-    user_id = int(user.get("id", 0))
-    if user_id == ADMIN_ID:
+
+    if init_data:
+        user = await verify_telegram_data(init_data)
+        if not user:
+            log.warning("get_api_user: verify_telegram_data returned None")
+            return None
+        user_id = int(user.get("id", 0))
+        if user_id == ADMIN_ID:
+            return user
+        team = await db_get_team()
+        team_ids = [int(p["user_id"]) for p in team]
+        if user_id not in team_ids:
+            log.warning(f"get_api_user: user {user_id} not in team {team_ids}")
+            return None
         return user
-    team = await db_get_team()
-    team_ids = [int(p["user_id"]) for p in team]
-    if user_id not in team_ids:
-        log.warning(f"get_api_user: user {user_id} not in team {team_ids}")
-        return None
-    return user
+
+    # Fallback для форков Telegram (BG Gram, Nicegram и т.д.)
+    # которые не передают initData — проверяем по user_id из query
+    uid_str = request.rel_url.query.get("uid", "")
+    if uid_str:
+        try:
+            user_id = int(uid_str)
+            team = await db_get_team()
+            team_ids = [int(p["user_id"]) for p in team]
+            if user_id == ADMIN_ID or user_id in team_ids:
+                # Найдём данные игрока из БД
+                player = next((p for p in team if int(p["user_id"]) == user_id), None)
+                if player:
+                    return {
+                        "id": user_id,
+                        "username": player.get("username", ""),
+                        "first_name": player.get("display_name", ""),
+                    }
+        except Exception:
+            pass
+
+    log.warning("get_api_user: no init_data in request")
+    return None
 
 
 async def api_health(request: Request) -> Response:
