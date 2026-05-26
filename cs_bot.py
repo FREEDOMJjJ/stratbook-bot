@@ -964,7 +964,7 @@ async def get_api_user(request: Request) -> Optional[Dict]:
     if init_data:
         user = await verify_telegram_data(init_data)
         if not user:
-            log.warning("get_api_user: verify_telegram_data returned None")
+            log.warning(f"get_api_user: verify failed, init_data length={len(init_data)}")
             return None
         user_id = int(user.get("id", 0))
         if user_id == ADMIN_ID:
@@ -976,8 +976,7 @@ async def get_api_user(request: Request) -> Optional[Dict]:
             return None
         return user
 
-    # Fallback для форков Telegram (BG Gram, Nicegram и т.д.)
-    # которые не передают initData — проверяем по user_id из query
+    # Fallback для форков (uid query param)
     uid_str = request.rel_url.query.get("uid", "")
     if uid_str:
         try:
@@ -985,7 +984,6 @@ async def get_api_user(request: Request) -> Optional[Dict]:
             team = await db_get_team()
             team_ids = [int(p["user_id"]) for p in team]
             if user_id == ADMIN_ID or user_id in team_ids:
-                # Найдём данные игрока из БД
                 player = next((p for p in team if int(p["user_id"]) == user_id), None)
                 if player:
                     return {
@@ -993,10 +991,14 @@ async def get_api_user(request: Request) -> Optional[Dict]:
                         "username": player.get("username", ""),
                         "first_name": player.get("display_name", ""),
                     }
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning(f"get_api_user uid fallback error: {e}")
 
-    log.warning("get_api_user: no init_data in request")
+    # Логируем заголовки для отладки (без чувствительных данных)
+    headers_info = {k: (v[:20] + '...' if len(v) > 20 else v)
+                    for k, v in request.headers.items()
+                    if k.lower() not in ('cookie', 'authorization')}
+    log.warning(f"get_api_user: no auth. path={request.path} headers={list(headers_info.keys())} uid_param={uid_str!r}")
     return None
 
 
