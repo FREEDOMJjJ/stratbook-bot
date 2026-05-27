@@ -80,8 +80,9 @@ INSTA_LINK = "https://docs.google.com/spreadsheets/d/1C4ZIfJKl4WvnCkH3eVB7v0lw7N
 MAIN_MENU_TEXT = "📚 <b>EGOIST STRATBOOK</b>\n\nВыбери раздел и получи нужную информацию:"
 
 STRAT_BOOKS = {
-    "mirage": "https://docs.google.com/document/d/1KfaADUAV4jy2QqHyjUlAJ5rBd9SQuFokAmQN86DDHEE/edit?tab=t.5w09v52hr780",
-    "dust2": "https://docs.google.com/document/d/1o_B5xguuRmTO1lw2b9NB7sphzWZFvlEiQaU2VKlbzDU/edit?tab=t.5w09v52hr780",
+    "mirage":  "https://docs.google.com/document/d/1KfaADUAV4jy2QqHyjUlAJ5rBd9SQuFokAmQN86DDHEE/edit?tab=t.5w09v52hr780",
+    "inferno": "https://docs.google.com/document/d/1Aomse-wlECH3d4mXPMJl5FbKzrNRWja7YWKYwE4Ja5s/edit?usp=sharing",
+    "dust2":   "https://docs.google.com/document/d/1o_B5xguuRmTO1lw2b9NB7sphzWZFvlEiQaU2VKlbzDU/edit?tab=t.5w09v52hr780",
     "ancient": None,
 }
 
@@ -904,9 +905,10 @@ def main_menu_webapp() -> InlineKeyboardMarkup:
 def map_menu(section: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=3)
     kb.add(
-        InlineKeyboardButton("Mirage", callback_data=f"map:{section}:mirage"),
-        InlineKeyboardButton("Dust 2", callback_data=f"map:{section}:dust2"),
-        InlineKeyboardButton("Ancient", callback_data=f"map:{section}:ancient"),
+        InlineKeyboardButton("Mirage",   callback_data=f"map:{section}:mirage"),
+        InlineKeyboardButton("Inferno",  callback_data=f"map:{section}:inferno"),
+        InlineKeyboardButton("Dust 2",   callback_data=f"map:{section}:dust2"),
+        InlineKeyboardButton("Ancient",  callback_data=f"map:{section}:ancient"),
     )
     if section == "nades":
         kb.add(InlineKeyboardButton("⚡️ Insta", url=INSTA_LINK))
