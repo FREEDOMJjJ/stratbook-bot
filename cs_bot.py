@@ -960,24 +960,22 @@ async def get_api_user(request: Request) -> Optional[Dict]:
     init_data = request.headers.get("X-Telegram-Init-Data", "")
     if not init_data:
         init_data = request.rel_url.query.get("tg", "")
+    uid_str = request.rel_url.query.get("uid", "")
 
+    # Пробуем верифицировать через initData
     if init_data:
         user = await verify_telegram_data(init_data)
-        if not user:
-            log.warning(f"get_api_user: verify failed, init_data length={len(init_data)}")
-            return None
-        user_id = int(user.get("id", 0))
-        if user_id == ADMIN_ID:
-            return user
-        team = await db_get_team()
-        team_ids = [int(p["user_id"]) for p in team]
-        if user_id not in team_ids:
-            log.warning(f"get_api_user: user {user_id} not in team {team_ids}")
-            return None
-        return user
+        if user:
+            user_id = int(user.get("id", 0))
+            if user_id == ADMIN_ID:
+                return user
+            team = await db_get_team()
+            if user_id in [int(p["user_id"]) for p in team]:
+                return user
+            log.warning(f"get_api_user: verified user {user_id} not in team")
+            # Падаем в uid fallback ниже
 
-    # Fallback для форков (uid query param)
-    uid_str = request.rel_url.query.get("uid", "")
+    # uid fallback — для Desktop и форков где initData пустой
     if uid_str:
         try:
             user_id = int(uid_str)
@@ -986,19 +984,17 @@ async def get_api_user(request: Request) -> Optional[Dict]:
             if user_id == ADMIN_ID or user_id in team_ids:
                 player = next((p for p in team if int(p["user_id"]) == user_id), None)
                 if player:
+                    log.info(f"get_api_user: uid fallback ok for {user_id} (@{player.get('username')})")
                     return {
                         "id": user_id,
                         "username": player.get("username", ""),
                         "first_name": player.get("display_name", ""),
                     }
+            log.warning(f"get_api_user: uid {user_id} not in team {team_ids}")
         except Exception as e:
-            log.warning(f"get_api_user uid fallback error: {e}")
+            log.warning(f"get_api_user uid parse error: {e}")
 
-    # Логируем заголовки для отладки (без чувствительных данных)
-    headers_info = {k: (v[:20] + '...' if len(v) > 20 else v)
-                    for k, v in request.headers.items()
-                    if k.lower() not in ('cookie', 'authorization')}
-    log.warning(f"get_api_user: no auth. path={request.path} headers={list(headers_info.keys())} uid_param={uid_str!r}")
+    log.warning(f"get_api_user: no auth. path={request.path} init_data_len={len(init_data)} uid={uid_str!r}")
     return None
 
 
