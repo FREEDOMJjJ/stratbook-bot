@@ -1134,6 +1134,9 @@ async def setup_api(app: web.Application) -> None:
         ("/api/health",          [("GET",  api_health)]),
         ("/api/me",              [("GET",  api_me)]),
         ("/api/team",            [("GET",  api_team)]),
+        ("/api/streak",          [("GET",  api_streak)]),
+        ("/api/random-map",      [("GET",  api_random_map)]),
+        ("/api/call-all",        [("POST", api_call_all)]),
         ("/api/availability",    [("GET",  api_availability_grid),
                                   ("POST", api_set_availability)]),
     ]
@@ -1311,6 +1314,46 @@ async def api_random_map(request: Request) -> Response:
     m = _rnd.choice(CS2_MAPS)
     return json_response({"map": m})
 
+
+# Анти-спам для "позвать всех" — не чаще раза в 10 минут
+_last_callall: float = 0.0
+
+async def api_call_all(request: Request) -> Response:
+    global _last_callall
+    user = await get_api_user(request)
+    if not user:
+        return json_response({"error": "Unauthorized"}, status=401)
+    try:
+        body = await request.json()
+        slot_date = body.get("slot_date", "")
+        # Анти-спам
+        now = datetime.now().timestamp()
+        if now - _last_callall < 600:
+            return json_response({"error": "too_soon", "wait": int(600 - (now - _last_callall))}, status=429)
+        _last_callall = now
+
+        caller = user.get("first_name") or user.get("username") or "Игрок"
+        when = ""
+        if slot_date:
+            try:
+                d = date.fromisoformat(slot_date)
+                when = f" на {WEEKDAYS_FULL[d.weekday()]} {d.strftime('%d.%m')}"
+            except Exception:
+                pass
+
+        await bot.send_message(
+            GROUP_ID,
+            f"📣 <b>{caller} зовёт всех в состав{when}!</b>\n\n"
+            f"{PLAYERS_TAG}\n\n"
+            f"👉 Отметьтесь в календаре",
+            parse_mode="HTML",
+            message_thread_id=SCRIMS_TOPIC_ID
+        )
+        return json_response({"ok": True})
+    except Exception as e:
+        log.error(f"api_call_all: {e}")
+        return json_response({"error": str(e)}, status=500)
+
 async def _start_api() -> None:
     app = web.Application()
     await setup_api(app)
@@ -1319,6 +1362,178 @@ async def _start_api() -> None:
     site = web.TCPSite(runner, "0.0.0.0", API_PORT)
     await site.start()
     log.info(f"🌐 API server started on port {API_PORT}")
+
+def fmt_time_label(t: str) -> str:
+    """Универсальный форматтер времени для отображения."""
+    return {
+        "anytime": "🌅 Весь день",
+        "ALL DAY": "🌅 Весь день",
+        "MORNING": "🌅 Утро (10-14)",
+        "DAY":     "☀️ День (14-19)",
+        "NIGHT":   "🌙 Ночь (19-23)",
+    }.get(t, f"🕐 {t}")
+
+
+WEEKDAYS_FULL = ["Понедельник","Вторник","Среда","Четверг","Пятница","Суббота","Воскресенье"]
+
+
+async def _build_day_summary(target: date) -> str:
+    """Текстовая сводка по дню: кто готов, кто пас, кто молчит."""
+    grid = await db_get_availability_grid(15)
+    team = await db_get_team()
+    iso  = target.isoformat()
+
+    can, cant, marked_ids = [], [], set()
+    for e in grid:
+        if e["slot_date"] != iso:
+            continue
+        marked_ids.add(int(e["user_id"]))
+        nm = e.get("display_name") or e.get("username") or "?"
+        if e["status"] == "can":
+            can.append((nm, e.get("time_text", "anytime")))
+        elif e["status"] == "cant":
+            cant.append(nm)
+
+    waiting = [
+        (p.get("display_name") or p.get("username") or "?")
+        for p in team if int(p["user_id"]) not in marked_ids
+    ]
+
+    wd = WEEKDAYS_FULL[target.weekday()]
+    lines = [f"📅 <b>{wd}, {target.strftime('%d.%m')}</b>", ""]
+
+    if can:
+        lines.append(f"✅ <b>Готовы ({len(can)}):</b>")
+        for nm, t in can:
+            lines.append(f"  • {nm} — {fmt_time_label(t)}")
+    if cant:
+        lines.append("")
+        lines.append(f"❌ <b>Не могут ({len(cant)}):</b>")
+        lines.append("  " + ", ".join(cant))
+    if waiting:
+        lines.append("")
+        lines.append(f"⏳ <b>Молчат ({len(waiting)}):</b>")
+        lines.append("  " + ", ".join(waiting))
+
+    if len(can) >= TEAM_SIZE:
+        lines.append("")
+        lines.append("🔥 <b>СОСТАВ СОБРАН!</b>")
+
+    return "\n".join(lines)
+
+
+@dp.message_handler(commands=["today"])
+async def cmd_today(message: Message) -> None:
+    """Кто сегодня готов."""
+    try:
+        text = await _build_day_summary(date.today())
+        await message.reply(text, parse_mode="HTML")
+    except Exception as e:
+        log.error(f"cmd_today: {e}")
+        await message.reply("❌ Ошибка")
+
+
+@dp.message_handler(commands=["week"])
+async def cmd_week(message: Message) -> None:
+    """Сводка на 7 дней вперёд."""
+    try:
+        grid = await db_get_availability_grid(8)
+        today = date.today()
+        # Считаем готовых по дням
+        by_day: Dict[str, int] = {}
+        for e in grid:
+            if e["status"] == "can":
+                by_day[e["slot_date"]] = by_day.get(e["slot_date"], 0) + 1
+
+        lines = ["📆 <b>Ближайшая неделя</b>", ""]
+        for i in range(7):
+            d = today + timedelta(days=i)
+            cnt = by_day.get(d.isoformat(), 0)
+            wd = WEEKDAYS_FULL[d.weekday()][:2]
+            bar = "🟩" * cnt + "⬜" * (TEAM_SIZE - cnt)
+            mark = " 🔥" if cnt >= TEAM_SIZE else ""
+            day_lbl = "сегодня" if i == 0 else "завтра" if i == 1 else f"{d.strftime('%d.%m')}"
+            lines.append(f"<b>{wd}</b> {day_lbl}: {bar} {cnt}/{TEAM_SIZE}{mark}")
+
+        await message.reply("\n".join(lines), parse_mode="HTML")
+    except Exception as e:
+        log.error(f"cmd_week: {e}")
+        await message.reply("❌ Ошибка")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🗳 Голосование за время прака
+# ─────────────────────────────────────────────────────────────────────────────
+
+# In-memory хранилище голосов: {message_id: {time_slot: set(user_ids)}}
+_time_votes: Dict[int, Dict[str, set]] = {}
+
+VOTE_TIMES = ["18:00", "19:00", "20:00", "21:00", "22:00"]
+
+
+@dp.message_handler(commands=["votetime"])
+async def cmd_votetime(message: Message) -> None:
+    """Запустить голосование за время прака."""
+    # Чистим старые голосования если их много (защита памяти)
+    if len(_time_votes) > 20:
+        for k in list(_time_votes.keys())[:10]:
+            del _time_votes[k]
+
+    kb = InlineKeyboardMarkup(row_width=3)
+    btns = [InlineKeyboardButton(f"{t} (0)", callback_data=f"vt:{t}") for t in VOTE_TIMES]
+    kb.add(*btns)
+    thread_id = getattr(message, "message_thread_id", None)
+    sent = await bot.send_message(
+        message.chat.id,
+        f"🗳 <b>Во сколько играем?</b>\n\nЖми на удобное время:\n\n{PLAYERS_TAG}",
+        parse_mode="HTML",
+        message_thread_id=thread_id,
+    )
+    _time_votes[sent.message_id] = {t: set() for t in VOTE_TIMES}
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("vt:"))
+async def cb_votetime(call: CallbackQuery) -> None:
+    msg_id = call.message.message_id
+    chosen = call.data.split(":", 1)[1]
+    uid    = call.from_user.id
+
+    if msg_id not in _time_votes:
+        _time_votes[msg_id] = {t: set() for t in VOTE_TIMES}
+
+    votes = _time_votes[msg_id]
+    # Снимаем голос со всех других времён (один голос на человека)
+    for t in votes:
+        votes[t].discard(uid)
+    # Ставим на выбранное (повторный тап = снять)
+    if uid in votes.get(chosen, set()):
+        votes[chosen].discard(uid)
+    else:
+        votes.setdefault(chosen, set()).add(uid)
+
+    # Обновляем кнопки
+    kb = InlineKeyboardMarkup(row_width=3)
+    btns = [
+        InlineKeyboardButton(f"{t} ({len(votes.get(t, set()))})", callback_data=f"vt:{t}")
+        for t in VOTE_TIMES
+    ]
+    kb.add(*btns)
+
+    # Лидер
+    best = max(votes.items(), key=lambda kv: len(kv[1]), default=(None, set()))
+    leader = ""
+    if best[0] and len(best[1]) > 0:
+        leader = f"\n\n🏆 Лидирует <b>{best[0]}</b> ({len(best[1])} голос.)"
+
+    try:
+        await call.message.edit_text(
+            f"🗳 <b>Во сколько играем?</b>\n\nЖми на удобное время:{leader}\n\n{PLAYERS_TAG}",
+            parse_mode="HTML", reply_markup=kb
+        )
+    except Exception:
+        pass
+    await call.answer(f"Твой голос: {chosen}")
+
 
 @dp.message_handler(commands=["randommap", "rmap"])
 async def cmd_randommap(message: Message) -> None:
@@ -1405,6 +1620,9 @@ async def cmd_help(message: Message) -> None:
 
         "📅 <b>Календарь</b>\n"
         "/calendar — открыть календарь сборов\n"
+        "/today — кто сегодня готов\n"
+        "/week — сводка на неделю\n"
+        "/votetime — голосование за время прака\n"
         "/calendarpost — закрепить кнопку в ПРАКАХ\n"
         "/stratpost — закрепить кнопки разделов в STRATBOOK\n"
         "/upcoming — ближайшие праки из Google Calendar\n\n"
