@@ -1343,9 +1343,9 @@ async def api_call_all(request: Request) -> Response:
 
         await bot.send_message(
             GROUP_ID,
-            f"📣 <b>{caller} зовёт всех в состав{when}!</b>\n\n"
-            f"{PLAYERS_TAG}\n\n"
-            f"👉 Отметьтесь в календаре",
+            f"📣 <b>{caller} собирает состав{when}!</b>\n\n"
+            f"Залетаем на праки, отметьтесь в календаре кто готов 👇\n\n"
+            f"{PLAYERS_TAG}",
             parse_mode="HTML",
             message_thread_id=SCRIMS_TOPIC_ID
         )
