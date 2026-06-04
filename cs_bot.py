@@ -586,12 +586,17 @@ async def availability_watcher() -> None:
                     overlap_ok, mismatch_info = check_time_overlap(day["can"])
                     if overlap_ok:
                         if not await _already_notified(day["date"], 5):
-                            await _mark_notified(day["date"], 5)   # сначала флаг
+                            await _mark_notified(day["date"], 5)
                             await notify_full_house(day["date"], usernames)
                     else:
                         if not await _already_notified(day["date"], 50):
                             await _mark_notified(day["date"], 50)
                             await notify_time_mismatch(day["date"], day["can"], mismatch_info)
+
+                    # Авто-голосование за время — только если ещё не запускали сегодня
+                    if not await _already_notified(day["date"], 77):
+                        await _mark_notified(day["date"], 77)
+                        await auto_votetime(day["date"])
                 elif count == 4:
                     if not await _already_notified(day["date"], 4):
                         await _mark_notified(day["date"], 4)
@@ -1469,6 +1474,40 @@ async def cmd_week(message: Message) -> None:
 _time_votes: Dict[int, Dict[str, set]] = {}
 
 VOTE_TIMES = ["18:00", "19:00", "20:00", "21:00", "22:00"]
+
+
+async def auto_votetime(slot_date: str) -> None:
+    """Автоматически запускает голосование за время когда все 5 готовы."""
+    try:
+        # Чистим старые голоса если накопились
+        if len(_time_votes) > 20:
+            for k in list(_time_votes.keys())[:10]:
+                del _time_votes[k]
+
+        day_date = date.fromisoformat(slot_date)
+        weekdays = ["Понедельник","Вторник","Среда","Четверг","Пятница","Суббота","Воскресенье"]
+        wd = weekdays[day_date.weekday()]
+
+        kb = InlineKeyboardMarkup(row_width=3)
+        btns = [InlineKeyboardButton(f"{t} (0)", callback_data=f"vt:{t}") for t in VOTE_TIMES]
+        kb.add(*btns)
+
+        text = (
+            f"✅ <b>Все 5 готовы!</b> {wd} {day_date.strftime('%d.%m')}\n\n"
+            f"🗳 Во сколько играем?\n\n"
+            f"{PLAYERS_TAG}"
+        )
+
+        sent = await bot.send_message(
+            GROUP_ID, text,
+            parse_mode="HTML",
+            reply_markup=kb,
+            message_thread_id=SCRIMS_TOPIC_ID,
+        )
+        _time_votes[sent.message_id] = {t: set() for t in VOTE_TIMES}
+        log.info(f"⏰ auto_votetime sent for {slot_date}")
+    except Exception as e:
+        log.error(f"auto_votetime: {e}")
 
 
 @dp.message_handler(commands=["votetime"])
