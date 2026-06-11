@@ -199,6 +199,13 @@ async def db_init() -> None:
                 notified_at TIMESTAMP DEFAULT NOW(),
                 PRIMARY KEY (slot_date, count)
             );
+            -- История отметок для умных напоминаний
+            CREATE TABLE IF NOT EXISTS mark_events (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                slot_date DATE NOT NULL,
+                marked_at TIMESTAMP DEFAULT NOW()
+            );
             -- Миграция avail_notifications:
             -- 1. Удалить старую колонку slot_time если есть
             -- 2. Добавить PK если нет
@@ -440,6 +447,14 @@ async def db_set_availability(user_id: int, slot_date: str, time_text: str, stat
                     "INSERT INTO availability (user_id, slot_date, time_text, status, updated_at) VALUES ($1, $2, $3, $4, NOW())",
                     user_id, d, time_text, status
                 )
+                # История отметок — для умных напоминаний (только активные отметки)
+                try:
+                    await conn.execute(
+                        "INSERT INTO mark_events (user_id, slot_date) VALUES ($1, $2)",
+                        user_id, d
+                    )
+                except Exception:
+                    pass
             return True
     except Exception as e:
         log.error(f"db_set_availability error: {e}")
@@ -1193,6 +1208,136 @@ async def _notify_player_left(slot_date: str, username: str) -> None:
 # ⏰ Напоминалка в 20:00 МСК — кто не отметился на завтра
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 🧠 Умные напоминания — бот учится когда каждый обычно отмечается
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def get_usual_mark_minutes(user_id: int) -> Optional[int]:
+    """Медиана времени отметки игрока (минуты от полуночи МСК).
+    None если истории мало (<5 отметок за 30 дней)."""
+    try:
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT marked_at FROM mark_events
+                WHERE user_id = $1
+                  AND marked_at >= NOW() - INTERVAL '30 days'
+                ORDER BY marked_at DESC
+                LIMIT 14
+            """, user_id)
+            if len(rows) < 5:
+                return None
+            minutes = []
+            for r in rows:
+                # marked_at в UTC — переводим в МСК
+                t = r["marked_at"].replace(tzinfo=UTC).astimezone(MOSCOW_TZ)
+                minutes.append(t.hour * 60 + t.minute)
+            minutes.sort()
+            return minutes[len(minutes) // 2]   # медиана
+    except Exception as e:
+        log.error(f"get_usual_mark_minutes: {e}")
+        return None
+
+
+async def _send_smart_ping(user_id: int, username: str, display: str, usual_min: int) -> None:
+    """Пинг лично в ЛС, фоллбэк — мягкий тег в группе."""
+    usual_h, usual_m = divmod(usual_min, 60)
+    usual_str = f"{usual_h:02d}:{usual_m:02d}"
+    tomorrow = date.today() + timedelta(days=1)
+    wd = WEEKDAYS_FULL[tomorrow.weekday()]
+
+    pm_text = (
+        f"👀 Привет! Ты обычно отмечаешься к {usual_str}, "
+        f"а на завтра ({wd}) пока пусто.\n\n"
+        f"Зайди в календарь и отметь сможешь или нет 👇"
+    )
+    try:
+        await bot.send_message(user_id, pm_text)
+        log.info(f"🧠 smart ping PM -> {username}")
+        return
+    except Exception:
+        pass  # ЛС закрыт — фоллбэк в группу
+
+    try:
+        await bot.send_message(
+            GROUP_ID,
+            f"👀 @{username}, на завтра ({wd}) от тебя пока нет отметки — "
+            f"глянь календарь когда будет минутка",
+            message_thread_id=SCRIMS_TOPIC_ID,
+        )
+        log.info(f"🧠 smart ping GROUP -> {username}")
+    except Exception as e:
+        log.error(f"_send_smart_ping group: {e}")
+
+
+async def smart_reminder_watcher() -> None:
+    """Каждые 15 минут: кто обычно уже отметился бы, но молчит — пингуем.
+
+    Правила:
+    • Только окно 12:00–23:00 МСК
+    • Буфер +45 минут после медианы игрока
+    • Один пинг на игрока на дату (notif code = 60 + позиция в команде)
+    • Не пингуем если день уже 5/5 или игрок отметился (can/cant)
+    """
+    log.info("🧠 Smart reminder watcher started")
+    while True:
+        try:
+            now_msk = datetime.now(MOSCOW_TZ)
+            now_min = now_msk.hour * 60 + now_msk.minute
+
+            # Тихие часы
+            if now_msk.hour < 12 or now_msk.hour >= 23:
+                await asyncio.sleep(900)
+                continue
+
+            tomorrow = date.today() + timedelta(days=1)
+            tomorrow_iso = tomorrow.isoformat()
+
+            grid = await db_get_availability_grid(2)
+            marked_ids: set = set()
+            can_count = 0
+            for entry in grid:
+                if entry["slot_date"] == tomorrow_iso:
+                    marked_ids.add(int(entry["user_id"]))
+                    if entry["status"] == "can":
+                        can_count += 1
+
+            # Состав уже собран — никого не трогаем
+            if can_count >= TEAM_SIZE:
+                await asyncio.sleep(900)
+                continue
+
+            team = await db_get_team()
+            for idx, p in enumerate(team):
+                uid = int(p["user_id"])
+                if uid in marked_ids:
+                    continue  # уже отметился (can или cant)
+
+                usual = await get_usual_mark_minutes(uid)
+                if usual is None:
+                    continue  # мало истории — общая напоминалка в 20:00 покроет
+
+                # Медиана + 45 минут буфер уже прошли?
+                if now_min < usual + 45:
+                    continue
+
+                # Антиспам: один пинг на игрока на дату
+                notif_code = 60 + idx
+                if await _already_notified(tomorrow_iso, notif_code):
+                    continue
+                await _mark_notified(tomorrow_iso, notif_code)
+
+                await _send_smart_ping(
+                    uid,
+                    p.get("username", ""),
+                    p.get("display_name", ""),
+                    usual,
+                )
+
+        except Exception as e:
+            log.error(f"smart_reminder_watcher: {e}")
+        await asyncio.sleep(900)  # 15 минут
+
+
 async def reminder_watcher() -> None:
     """Каждый день в 20:00 МСК — напоминаем кто не отметился на завтра."""
     log.info("⏰ Reminder watcher started")
@@ -1621,6 +1766,7 @@ async def on_startup(dp: Dispatcher) -> None:
     asyncio.create_task(quote_loop())
     asyncio.create_task(availability_watcher())
     asyncio.create_task(reminder_watcher())
+    asyncio.create_task(smart_reminder_watcher())
     asyncio.create_task(_start_api())
     try:
         await bot.edit_message_text(
